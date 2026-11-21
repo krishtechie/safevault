@@ -1,0 +1,5 @@
+# Only index.php is callable. Config and sample files are never served.
+<FilesMatch "^(config|config\.sample)\.php$">
+  Require all denied
+</FilesMatch>
+Options -Indexes

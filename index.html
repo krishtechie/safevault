@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://api.pwnedpasswords.com; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex, nofollow">
+<meta name="theme-color" content="#0a1020">
+<title>Vault</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- Unlock / create account -->
+<main id="auth" class="auth">
+  <form id="authForm" class="card auth-card" autocomplete="off">
+    <img class="mark" src="icons/icon-192.png" alt="" width="56" height="56">
+    <h1>Vault</h1>
+    <p id="authLead" class="muted">Unlock with your master password.</p>
+
+    <label>Username
+      <input id="aUser" type="text" autocapitalize="none" autocorrect="off" spellcheck="false" required minlength="3" maxlength="32">
+    </label>
+    <label>Master password
+      <input id="aPass" type="password" required autocomplete="off">
+    </label>
+    <div id="regFields" hidden>
+      <label>Confirm master password
+        <input id="aPass2" type="password" autocomplete="off">
+      </label>
+      <label>Invite code
+        <input id="aInvite" type="password" autocomplete="off">
+      </label>
+      <p class="note">There is no reset. If you forget the master password, the vault cannot be opened by anyone, including the server owner.</p>
+    </div>
+
+    <button id="authBtn" class="btn primary" type="submit">Unlock</button>
+    <p id="authMsg" class="msg" role="alert"></p>
+    <button id="authToggle" class="link" type="button">Create an account</button>
+  </form>
+</main>
+
+<!-- App -->
+<div id="app" class="app" hidden>
+  <nav class="side">
+    <div class="brand"><img src="icons/icon-192.png" alt="" width="28" height="28"><span>Vault</span></div>
+    <div class="tabs">
+      <button class="tab active" data-view="vault" type="button">Passwords</button>
+      <button class="tab" data-view="generator" type="button">Generator</button>
+      <button class="tab" data-view="health" type="button">Health</button>
+      <button class="tab" data-view="settings" type="button">Settings</button>
+    </div>
+    <div class="side-foot">
+      <button id="syncBtn" class="status" type="button" title="Sync now"><span id="syncDot" class="dot"></span><span id="syncText">Starting</span></button>
+      <button id="lockBtn" class="btn ghost" type="button">Lock</button>
+    </div>
+  </nav>
+
+  <div class="content">
+    <header class="topbar">
+      <button id="syncBtnM" class="status" type="button"><span id="syncDotM" class="dot"></span><span id="syncTextM">Starting</span></button>
+      <button id="lockBtnM" class="btn ghost small" type="button">Lock</button>
+    </header>
+
+    <section id="view-vault" class="view">
+      <div class="row head">
+        <input id="search" type="search" placeholder="Search passwords" autocomplete="off">
+        <button id="addBtn" class="btn primary" type="button">Add</button>
+      </div>
+      <ul id="list" class="list"></ul>
+      <p id="empty" class="muted center" hidden>Nothing here yet. Tap Add to save your first password.</p>
+    </section>
+
+    <section id="view-generator" class="view" hidden>
+      <h2>Generator</h2>
+      <div class="card">
+        <output id="genOut" class="gen-out"></output>
+        <p id="genBits" class="muted"></p>
+        <div class="row">
+          <button id="genNew" class="btn" type="button">New</button>
+          <button id="genCopy" class="btn primary" type="button">Copy</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="seg">
+          <button id="modeRandom" class="seg-btn active" type="button">Random</button>
+          <button id="modeWords" class="seg-btn" type="button">Passphrase</button>
+        </div>
+        <div id="optRandom">
+          <label>Length <span id="lenVal">20</span>
+            <input id="gLen" type="range" min="8" max="64" value="20">
+          </label>
+          <label class="check"><input id="gLower" type="checkbox" checked> Lowercase</label>
+          <label class="check"><input id="gUpper" type="checkbox" checked> Uppercase</label>
+          <label class="check"><input id="gDigits" type="checkbox" checked> Numbers</label>
+          <label class="check"><input id="gSymbols" type="checkbox" checked> Symbols</label>
+        </div>
+        <div id="optWords" hidden>
+          <label>Words <span id="wordsVal">6</span>
+            <input id="gWords" type="range" min="4" max="10" value="6">
+          </label>
+          <label class="check"><input id="gCap" type="checkbox"> Capitalize words</label>
+          <label class="check"><input id="gNum" type="checkbox"> Add a number</label>
+        </div>
+      </div>
+    </section>
+
+    <section id="view-health" class="view" hidden>
+      <h2>Password health</h2>
+      <div class="card">
+        <p class="muted">Checks every saved password against known breaches, and flags reused and weak ones. Only the first 5 characters of each password's hash are sent, so the passwords never leave this device.</p>
+        <button id="healthBtn" class="btn primary" type="button">Run check</button>
+        <p id="healthMsg" class="muted"></p>
+      </div>
+      <div id="healthOut"></div>
+    </section>
+
+    <section id="view-settings" class="view" hidden>
+      <h2>Settings</h2>
+      <div class="card">
+        <h3>Auto-lock</h3>
+        <label>Lock after inactivity
+          <select id="lockMin">
+            <option value="1">1 minute</option>
+            <option value="5" selected>5 minutes</option>
+            <option value="15">15 minutes</option>
+            <option value="30">30 minutes</option>
+          </select>
+        </label>
+      </div>
+      <div class="card">
+        <h3>Backup</h3>
+        <p class="muted">The backup file is encrypted with your master password. Keep a copy somewhere other than this server.</p>
+        <button id="exportBtn" class="btn" type="button">Download encrypted backup</button>
+        <hr>
+        <label>Restore from a backup file
+          <input id="importFile" type="file" accept="application/json,.json">
+        </label>
+        <label>Master password of that backup
+          <input id="importPass" type="password" autocomplete="off">
+        </label>
+        <button id="importBtn" class="btn" type="button">Merge backup into vault</button>
+        <p id="importMsg" class="msg"></p>
+      </div>
+      <div class="card">
+        <h3>This device</h3>
+        <p class="muted">Signed in as <strong id="whoami"></strong>. Signing out removes the encrypted copy stored on this device. Your vault stays on the server.</p>
+        <button id="signOutBtn" class="btn danger" type="button">Sign out of this device</button>
+      </div>
+    </section>
+  </div>
+</div>
+
+<!-- Entry editor -->
+<dialog id="itemDlg" class="dlg">
+  <form id="itemForm" method="dialog" autocomplete="off">
+    <h2 id="itemTitle">New password</h2>
+    <label>Name
+      <input id="fTitle" type="text" required maxlength="200" placeholder="e.g. Bank">
+    </label>
+    <label>Username or email
+      <span class="with-btn">
+        <input id="fUser" type="text" maxlength="300" autocapitalize="none" spellcheck="false">
+        <button id="fUserCopy" class="btn small" type="button">Copy</button>
+      </span>
+    </label>
+    <label>Password
+      <span class="with-btn">
+        <input id="fPass" type="password" maxlength="1000" autocomplete="off" spellcheck="false">
+        <button id="fShow" class="btn small" type="button">Show</button>
+        <button id="fPassCopy" class="btn small" type="button">Copy</button>
+      </span>
+    </label>
+    <button id="fGen" class="link" type="button">Generate a strong password</button>
+    <label>Website
+      <input id="fUrl" type="text" maxlength="500" autocapitalize="none" spellcheck="false" placeholder="https://">
+    </label>
+    <label>Notes
+      <textarea id="fNotes" rows="3" maxlength="5000"></textarea>
+    </label>
+    <div class="row end">
+      <button id="fDelete" class="btn danger" type="button" hidden>Delete</button>
+      <span class="grow"></span>
+      <button id="fCancel" class="btn" type="button">Cancel</button>
+      <button id="fSave" class="btn primary" type="submit">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+<script src="vendor/argon2.umd.min.js"></script>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
