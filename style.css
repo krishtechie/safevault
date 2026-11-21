@@ -106,10 +106,19 @@ input[type=file] { display: block; margin-top: 6px; color: var(--muted); max-wid
 .h-group h3 { display: flex; align-items: center; gap: 8px; }
 .badge { font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 999px; background: var(--side); border: 1px solid var(--line); }
 .badge.bad { color: var(--danger); } .badge.warn { color: var(--warn); } .badge.good { color: var(--ok); }
-.h-row { display: flex; justify-content: space-between; gap: 10px; padding: 9px 0; border-top: 1px solid var(--line); font-size: 14px; }
+.h-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 9px 0; border-top: 1px solid var(--line); font-size: 14px; }
 .h-row button { background: none; border: 0; color: var(--accent); font: inherit; cursor: pointer; padding: 0; text-align: left; }
 .h-row span { color: var(--muted); text-align: right; }
 
+.h-note { font-size: 13px; color: var(--muted); margin: 0 0 6px; }
+.h-row .h-fix { color: var(--accent-ink); background: var(--accent); border-radius: 8px; padding: 6px 12px; font-weight: 600; font-size: 13px; flex: none; }
+.h-info { flex: 1; min-width: 0; }
+.h-info span { display: block; text-align: left; }
+.h-row .h-name { font-weight: 600; color: var(--text); }
+.fix { background: var(--side); border: 1px solid var(--line); border-left: 3px solid var(--warn); border-radius: 10px; padding: 12px 14px; margin-bottom: 14px; font-size: 14px; }
+.fix ol { margin: 0 0 10px; padding-left: 20px; }
+.fix li { margin-bottom: 4px; }
+a.btn { display: inline-flex; align-items: center; text-decoration: none; }
 .dlg { border: 1px solid var(--line); border-radius: 16px; background: var(--panel); color: var(--text); padding: 20px; width: min(480px, calc(100vw - 24px)); max-height: calc(100vh - 24px); }
 .dlg::backdrop { background: rgba(3, 7, 18, .7); }
 

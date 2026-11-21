@@ -159,6 +159,15 @@
 <dialog id="itemDlg" class="dlg">
   <form id="itemForm" method="dialog" autocomplete="off">
     <h2 id="itemTitle">New password</h2>
+    <div id="fixBox" class="fix" hidden>
+      <p id="fixWhy"></p>
+      <ol>
+        <li>Tap "Generate a strong password" below, then Copy.</li>
+        <li>Open the website, sign in, and change the password there to the new one.</li>
+        <li>Come back here and tap Save.</li>
+      </ol>
+      <a id="fixOpen" class="btn small" target="_blank" rel="noopener noreferrer" hidden>Open website</a>
+    </div>
     <label>Name
       <input id="fTitle" type="text" required maxlength="200" placeholder="e.g. Bank">
     </label>

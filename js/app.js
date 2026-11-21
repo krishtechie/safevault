@@ -174,6 +174,7 @@ function lock() {
   Object.assign(S, { username: null, encKey: null, auth: null, salt: null, kdf: null, items: [], rev: 0, dirty: false });
   if ($('itemDlg').open) $('itemDlg').close();
   for (const id of ['fTitle', 'fUser', 'fPass', 'fUrl', 'fNotes', 'search', 'importPass']) $(id).value = '';
+  $('healthMsg').textContent = '';
   $('list').replaceChildren();
   $('healthOut').replaceChildren();
   $('genOut').textContent = '';
@@ -262,6 +263,7 @@ async function doSync() {
 async function persist() {
   S.dirty = true;
   S.changes++;
+  setStatus('pending'); // never show Synced while a change is still on its way
   await cacheState(await core.encryptVault(S.encKey, S.username, S.items));
   renderList();
   sync();
@@ -322,9 +324,25 @@ $('search').addEventListener('input', renderList);
 
 let editingId = null;
 let deleteArmed = false;
+let fixing = false;
 
-function openItem(id) {
+function siteLink(url) {
+  if (!url) return null;
+  try {
+    const u = new URL(/^[a-z][a-z0-9+.-]*:/i.test(url) ? url : 'https://' + url);
+    return u.protocol === 'https:' || u.protocol === 'http:' ? u.href : null;
+  } catch { return null; }
+}
+
+// `why` is set when opened from the Health tab: shows the reason and the steps to fix it.
+function openItem(id, why = '') {
   const it = id ? S.items.find((x) => x.id === id) : null;
+  $('fixBox').hidden = !why;
+  $('fixWhy').textContent = why;
+  const link = why ? siteLink(it?.url) : null;
+  $('fixOpen').hidden = !link;
+  if (link) $('fixOpen').href = link; else $('fixOpen').removeAttribute('href');
+  fixing = !!why;
   editingId = it ? it.id : null;
   $('itemTitle').textContent = it ? 'Edit password' : 'New password';
   $('fTitle').value = it?.title || '';
@@ -338,6 +356,8 @@ function openItem(id) {
   $('fDelete').textContent = 'Delete';
   deleteArmed = false;
   $('itemDlg').showModal();
+  $('itemDlg').scrollTop = 0;
+  if (why) $('fixBox').scrollIntoView({ block: 'start' });
 }
 
 $('addBtn').addEventListener('click', () => openItem(null));
@@ -369,6 +389,10 @@ $('itemForm').addEventListener('submit', async (ev) => {
   }
   $('itemDlg').close();
   await persist();
+  if (fixing) {
+    $('healthOut').replaceChildren();
+    $('healthMsg').textContent = 'Saved. Run the check again to confirm it is fixed.';
+  }
   toast('Saved');
 });
 
@@ -417,7 +441,7 @@ $('genCopy').addEventListener('click', () => copy($('genOut').textContent, 'Pass
 
 /* ---------- Health check ---------- */
 
-function healthGroup(title, tone, rows) {
+function healthGroup(title, tone, note, rows) {
   const card = document.createElement('div');
   card.className = 'card h-group';
   const h = document.createElement('h3');
@@ -427,16 +451,30 @@ function healthGroup(title, tone, rows) {
   b.textContent = String(rows.length);
   h.append(b);
   card.append(h);
-  for (const [it, detail] of rows) {
+  if (rows.length) {
+    const n = document.createElement('p');
+    n.className = 'h-note';
+    n.textContent = note;
+    card.append(n);
+  }
+  for (const [it, detail, why] of rows) {
     const row = document.createElement('div');
     row.className = 'h-row';
-    const open = document.createElement('button');
-    open.type = 'button';
-    open.textContent = it.title || '(no name)';
-    open.addEventListener('click', () => openItem(it.id));
+    const info = document.createElement('div');
+    info.className = 'h-info';
+    const name = document.createElement('span');
+    name.className = 'h-name';
+    name.textContent = it.title || '(no name)';
     const d = document.createElement('span');
-    d.textContent = detail;
-    row.append(open, d);
+    d.textContent = [it.username, detail].filter(Boolean).join(' · ');
+    info.append(name, d);
+    const fix = document.createElement('button');
+    fix.type = 'button';
+    fix.className = 'h-fix';
+    fix.textContent = 'Fix';
+    fix.setAttribute('aria-label', 'Fix ' + (it.title || 'entry'));
+    fix.addEventListener('click', () => openItem(it.id, why));
+    row.append(info, fix);
     card.append(row);
   }
   return card;
@@ -449,8 +487,10 @@ $('healthBtn').addEventListener('click', async () => {
   btn.disabled = true;
   $('healthOut').replaceChildren();
 
-  const reused = core.findReused(items).flatMap((g) => g.map((it) => [it, `shared by ${g.length} entries`]));
-  const weak = items.filter((it) => core.isWeak(it.password)).map((it) => [it, 'short or simple']);
+  const reused = core.findReused(items).flatMap((g) => g.map((it) => [it, `shared by ${g.length} entries`,
+    `This password is used by ${g.length} entries (${g.map((x) => x.title || 'no name').join(', ')}). If one of those sites is breached, the others are exposed too. Give each one its own password.`]));
+  const weak = items.filter((it) => core.isWeak(it.password)).map((it) => [it, 'short or simple',
+    'This password is short or simple enough to be guessed quickly. Replace it with a generated one.']);
 
   // One lookup per distinct password, a few at a time.
   const unique = [...new Set(items.map((it) => it.password))];
@@ -469,14 +509,18 @@ $('healthBtn').addEventListener('click', async () => {
   if (!S.encKey) return;
 
   const leaked = items.filter((it) => counts.get(it.password) > 0)
-    .map((it) => [it, `seen ${counts.get(it.password).toLocaleString()} times in breaches`]);
+    .map((it) => [it, `seen ${counts.get(it.password).toLocaleString()} times in breaches`,
+      `This exact password appears ${counts.get(it.password).toLocaleString()} times in leaked password lists, so attackers try it early. The lists hold passwords only and do not record which website or account they came from. It cannot be removed from those lists; changing it makes the leaked one useless.`]);
   const out = $('healthOut');
   if (failed) msg.textContent = 'Could not reach the leak check service. Reused and weak results are still shown. Try again when online.';
   else {
-    msg.textContent = `Checked ${items.length} entries. ${leaked.length + reused.length + weak.length ? 'Change the ones listed below.' : 'All clear.'}`;
-    out.append(healthGroup('Found in data breaches', 'bad', leaked));
+    msg.textContent = `Checked ${items.length} entries. ${leaked.length + reused.length + weak.length ? 'Tap Fix on each one below.' : 'All clear.'}`;
+    out.append(healthGroup('Found in data breaches', 'bad', 'These exact passwords are in leaked password lists. Change them first, on every site where you use them.', leaked));
   }
-  out.append(healthGroup('Reused', 'warn', reused), healthGroup('Weak', 'warn', weak));
+  out.append(
+    healthGroup('Reused', 'warn', 'The same password protects more than one account. Give each account its own.', reused),
+    healthGroup('Weak', 'warn', 'Short or simple passwords that are quick to guess.', weak),
+  );
   btn.disabled = false;
 });
 
