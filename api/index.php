@@ -33,7 +33,7 @@ if ($dataDir === '' || strlen($secret) < 32 || str_contains($secret, 'CHANGE_ME'
     || strlen($invite) < 12 || str_contains($invite, 'CHANGE_ME')) {
     fail(500, 'not_configured');
 }
-foreach (['', '/users', '/vaults', '/throttle', '/sessions'] as $sub) {
+foreach (['', '/users', '/vaults', '/throttle', '/sessions', '/pins'] as $sub) {
     if (!is_dir($dataDir . $sub) && !@mkdir($dataDir . $sub, 0700, true)) fail(500, 'data_dir_unwritable');
 }
 // The data folder must live outside the web root.
@@ -159,9 +159,16 @@ function start_session(): void {
     session_start();
 }
 function current_user(): ?string {
+    global $dataDir;
     start_session();
     $u = $_SESSION['u'] ?? null;
     if (!is_string($u) || (time() - (int)($_SESSION['t'] ?? 0)) > IDLE_SECONDS) {
+        $_SESSION = [];
+        return null;
+    }
+    // A password change or recovery bumps the account generation, which signs out every other device.
+    $user = read_json("$dataDir/users/$u.json");
+    if (!$user || (int)($user['gen'] ?? 0) !== (int)($_SESSION['g'] ?? 0)) {
         $_SESSION = [];
         return null;
     }
@@ -173,14 +180,58 @@ function require_user(): string {
     if ($u === null) fail(401, 'signed_out');
     return $u;
 }
-function sign_in(string $u): void {
+function sign_in(string $u, int $gen): void {
     start_session();
     session_regenerate_id(true);
-    $_SESSION = ['u' => $u, 't' => time()];
+    $_SESSION = ['u' => $u, 't' => time(), 'g' => $gen];
 }
+// A wrapped key is a small encrypted blob: the vault key locked with a password key or a recovery key.
+function valid_wrap(mixed $w): bool {
+    return is_string($w) && strlen($w) <= 1024 && valid_blob($w);
+}
+
+const DUMMY_HASH = '$2y$10$nHYP29y/FHhGZsklg8tTnOhhQCqOj3m25uhIv9MBJYchFv.hAECve';
 
 $userFile  = fn(string $u) => "$dataDir/users/$u.json";
 $vaultFile = fn(string $u) => "$dataDir/vaults/$u.json";
+
+// Checks a secret against a stored hash with throttling. Unknown users get a dummy hash so timing reveals nothing.
+$verify = function (string $kind, string $u, mixed $secretIn, ?string $hash) use ($ip): bool {
+    $keyPair = "$kind:$ip|$u";
+    $keyIp   = "$kind-ip:$ip";
+    if (throttle_count($keyPair, 900) >= 5 || throttle_count($keyIp, 900) >= 30) fail(429, 'slow_down');
+    $ok = b64_len($secretIn) === 32 && password_verify((string)$secretIn, $hash ?? DUMMY_HASH) && $hash !== null;
+    if (!$ok) {
+        throttle_hit($keyPair, 900);
+        throttle_hit($keyIp, 900);
+        return false;
+    }
+    throttle_clear($keyPair);
+    return true;
+};
+$updateUser = function (string $u, callable $fn) use ($userFile): array {
+    $file = $userFile($u);
+    return with_lock($file . '.lock', function () use ($file, $fn) {
+        $user = read_json($file) ?? fail(404, 'no_account');
+        $user = $fn($user);
+        write_json($file, $user);
+        return $user;
+    });
+};
+
+// PIN unlock records, one per device. The server holds half of the key needed to open the
+// vault on that device and releases it only for the right PIN, at most three wrong tries.
+$pinFile = function (mixed $deviceId) use ($dataDir): string {
+    if (b64_len($deviceId) !== 16) fail(400, 'bad_device');
+    return $dataDir . '/pins/' . bin2hex(base64_decode($deviceId, true)) . '.json';
+};
+$clearPins = function (string $u) use ($dataDir): void {
+    foreach (glob($dataDir . '/pins/*.json') ?: [] as $f) {
+        $rec = read_json($f);
+        if (($rec['user'] ?? null) === $u) { @unlink($f); @unlink($f . '.lock'); }
+    }
+};
+const PIN_TRIES = 3;
 
 /* ---------- Actions ---------- */
 
@@ -209,6 +260,7 @@ case 'POST register': {
     $kdf = valid_kdf($body['kdf'] ?? null) ?? fail(400, 'bad_kdf');
     if (b64_len($body['salt'] ?? null) !== 16) fail(400, 'bad_salt');
     if (b64_len($body['auth'] ?? null) !== 32) fail(400, 'bad_auth');
+    if (!valid_wrap($body['wrap'] ?? null)) fail(400, 'bad_wrap');
     if (!valid_blob($body['blob'] ?? null)) fail(400, 'bad_blob');
 
     $h = @fopen($userFile($u), 'x'); // atomic: fails if the account already exists
@@ -216,39 +268,172 @@ case 'POST register': {
     fwrite($h, json_encode([
         'salt' => $body['salt'], 'kdf' => $kdf,
         'auth_hash' => password_hash($body['auth'], PASSWORD_DEFAULT),
+        'wrap' => $body['wrap'], 'rec' => null, 'gen' => 0,
         'created' => time(),
-    ]));
+    ], JSON_UNESCAPED_SLASHES));
     fclose($h);
     @chmod($userFile($u), 0600);
     write_json($vaultFile($u), ['rev' => 1, 'blob' => $body['blob'], 'updated' => time()]);
-    sign_in($u);
+    sign_in($u, 0);
     out(200, ['rev' => 1]);
 }
 
 case 'POST login': {
     $u = valid_username($body['username'] ?? null) ?? fail(400, 'bad_username');
-    $keyPair = "login:$ip|$u";
-    $keyIp   = "login-ip:$ip";
-    if (throttle_count($keyPair, 900) >= 5 || throttle_count($keyIp, 900) >= 30) fail(429, 'slow_down');
     $user = read_json($userFile($u));
-    // Verify against a dummy hash for unknown users so timing does not reveal who exists.
-    $hash = $user['auth_hash'] ?? '$2y$10$nHYP29y/FHhGZsklg8tTnOhhQCqOj3m25uhIv9MBJYchFv.hAECve';
-    $ok = b64_len($body['auth'] ?? null) === 32 && password_verify((string)$body['auth'], $hash) && $user;
-    if (!$ok) {
-        throttle_hit($keyPair, 900);
-        throttle_hit($keyIp, 900);
-        fail(401, 'bad_credentials');
-    }
-    throttle_clear($keyPair);
-    sign_in($u);
+    if (!$verify('login', $u, $body['auth'] ?? null, $user['auth_hash'] ?? null)) fail(401, 'bad_credentials');
+    sign_in($u, (int)($user['gen'] ?? 0));
     $v = read_json($vaultFile($u));
-    out(200, ['rev' => (int)($v['rev'] ?? 0)]);
+    out(200, ['rev' => (int)($v['rev'] ?? 0), 'wrap' => $user['wrap'] ?? null, 'recovery' => !empty($user['rec'])]);
 }
 
 case 'POST logout': {
     start_session();
     $_SESSION = [];
     session_destroy();
+    out(200, ['ok' => true]);
+}
+
+case 'GET account': {
+    $u = require_user();
+    $user = read_json($userFile($u)) ?? fail(404, 'no_account');
+    out(200, ['wrap' => $user['wrap'] ?? null, 'recovery' => !empty($user['rec'])]);
+}
+
+case 'POST setwrap': {
+    // One-time upgrade for accounts created before key wrapping existed. Never overwrites an existing wrap.
+    $u = require_user();
+    if (!valid_wrap($body['wrap'] ?? null)) fail(400, 'bad_wrap');
+    $user = $updateUser($u, function (array $user) use ($body) {
+        if (!empty($user['wrap'])) out(200, ['wrap' => $user['wrap']]);
+        $user['wrap'] = $body['wrap'];
+        return $user;
+    });
+    out(200, ['wrap' => $user['wrap']]);
+}
+
+case 'POST rekey': {
+    // Change master password. The current sign-in key is checked again even though a session exists.
+    $u = require_user();
+    $user = read_json($userFile($u)) ?? fail(404, 'no_account');
+    if (!$verify('login', $u, $body['auth'] ?? null, $user['auth_hash'] ?? null)) fail(401, 'bad_credentials');
+    $kdf = valid_kdf($body['kdf'] ?? null) ?? fail(400, 'bad_kdf');
+    if (b64_len($body['salt'] ?? null) !== 16) fail(400, 'bad_salt');
+    if (b64_len($body['newAuth'] ?? null) !== 32) fail(400, 'bad_auth');
+    if (!valid_wrap($body['wrap'] ?? null)) fail(400, 'bad_wrap');
+    $user = $updateUser($u, function (array $user) use ($body, $kdf) {
+        $user['salt'] = $body['salt'];
+        $user['kdf'] = $kdf;
+        $user['auth_hash'] = password_hash($body['newAuth'], PASSWORD_DEFAULT);
+        $user['wrap'] = $body['wrap'];
+        $user['gen'] = (int)($user['gen'] ?? 0) + 1;
+        return $user;
+    });
+    $clearPins($u); // PINs on every device stop working until set again
+    sign_in($u, $user['gen']);
+    out(200, ['ok' => true]);
+}
+
+case 'POST recovery_set': {
+    // Create or replace the recovery key. Needs the current sign-in key again.
+    $u = require_user();
+    $user = read_json($userFile($u)) ?? fail(404, 'no_account');
+    if (!$verify('login', $u, $body['auth'] ?? null, $user['auth_hash'] ?? null)) fail(401, 'bad_credentials');
+    if (b64_len($body['recAuth'] ?? null) !== 32) fail(400, 'bad_auth');
+    if (!valid_wrap($body['recWrap'] ?? null)) fail(400, 'bad_wrap');
+    $updateUser($u, function (array $user) use ($body) {
+        $user['rec'] = ['auth_hash' => password_hash($body['recAuth'], PASSWORD_DEFAULT), 'wrap' => $body['recWrap'], 'created' => time()];
+        return $user;
+    });
+    out(200, ['recovery' => true]);
+}
+
+case 'POST recovery_clear': {
+    $u = require_user();
+    $user = read_json($userFile($u)) ?? fail(404, 'no_account');
+    if (!$verify('login', $u, $body['auth'] ?? null, $user['auth_hash'] ?? null)) fail(401, 'bad_credentials');
+    $updateUser($u, function (array $user) { $user['rec'] = null; return $user; });
+    out(200, ['recovery' => false]);
+}
+
+case 'POST recover_start': {
+    // Forgotten master password, step 1: prove knowledge of the recovery key, receive the wrapped vault key.
+    $u = valid_username($body['username'] ?? null) ?? fail(400, 'bad_username');
+    $user = read_json($userFile($u));
+    if (!$verify('recover', $u, $body['recAuth'] ?? null, $user['rec']['auth_hash'] ?? null)) fail(401, 'bad_credentials');
+    out(200, ['recWrap' => $user['rec']['wrap']]);
+}
+
+case 'POST recover_finish': {
+    // Step 2: set a new master password. The vault itself is not touched.
+    $u = valid_username($body['username'] ?? null) ?? fail(400, 'bad_username');
+    $user = read_json($userFile($u));
+    if (!$verify('recover', $u, $body['recAuth'] ?? null, $user['rec']['auth_hash'] ?? null)) fail(401, 'bad_credentials');
+    $kdf = valid_kdf($body['kdf'] ?? null) ?? fail(400, 'bad_kdf');
+    if (b64_len($body['salt'] ?? null) !== 16) fail(400, 'bad_salt');
+    if (b64_len($body['newAuth'] ?? null) !== 32) fail(400, 'bad_auth');
+    if (!valid_wrap($body['wrap'] ?? null)) fail(400, 'bad_wrap');
+    $user = $updateUser($u, function (array $user) use ($body, $kdf) {
+        $user['salt'] = $body['salt'];
+        $user['kdf'] = $kdf;
+        $user['auth_hash'] = password_hash($body['newAuth'], PASSWORD_DEFAULT);
+        $user['wrap'] = $body['wrap'];
+        $user['gen'] = (int)($user['gen'] ?? 0) + 1;
+        return $user;
+    });
+    $clearPins($u);
+    sign_in($u, $user['gen']);
+    $v = read_json($vaultFile($u));
+    out(200, ['rev' => (int)($v['rev'] ?? 0)]);
+}
+
+case 'POST pin_set': {
+    // Turn on PIN unlock for one device. Needs the current sign-in key again.
+    $u = require_user();
+    $user = read_json($userFile($u)) ?? fail(404, 'no_account');
+    if (!$verify('login', $u, $body['auth'] ?? null, $user['auth_hash'] ?? null)) fail(401, 'bad_credentials');
+    $file = $pinFile($body['deviceId'] ?? null);
+    if (b64_len($body['pinAuth'] ?? null) !== 32 || b64_len($body['ksrv'] ?? null) !== 32) fail(400, 'bad_pin_data');
+    $mine = 0;
+    foreach (glob($dataDir . '/pins/*.json') ?: [] as $f) {
+        if ($f !== $file && ((read_json($f)['user'] ?? null) === $u)) $mine++;
+    }
+    if ($mine >= 10) fail(409, 'too_many_devices');
+    write_json($file, [
+        'user' => $u, 'hash' => password_hash($body['pinAuth'], PASSWORD_DEFAULT), 'ksrv' => $body['ksrv'],
+        'fails' => 0, 'created' => time(),
+    ]);
+    out(200, ['ok' => true]);
+}
+
+case 'POST pin_unlock': {
+    // No session needed: the device id is a 128-bit random value known only to that device.
+    $file = $pinFile($body['deviceId'] ?? null);
+    if (throttle_count("pin-ip:$ip", 900) >= 30) fail(429, 'slow_down');
+    with_lock($file . '.lock', function () use ($file, $body, $ip) {
+        $rec = read_json($file);
+        if (!$rec) { @unlink($file . '.lock'); fail(404, 'pin_gone'); }
+        $ok = b64_len($body['pinAuth'] ?? null) === 32 && password_verify((string)$body['pinAuth'], (string)$rec['hash']);
+        if ($ok) {
+            if ((int)$rec['fails'] !== 0) { $rec['fails'] = 0; write_json($file, $rec); }
+            out(200, ['ksrv' => $rec['ksrv']]);
+        }
+        throttle_hit("pin-ip:$ip", 900);
+        $rec['fails'] = (int)$rec['fails'] + 1;
+        if ($rec['fails'] >= PIN_TRIES) {
+            @unlink($file); // the key half is destroyed: only the master password opens this device now
+            fail(403, 'pin_locked');
+        }
+        write_json($file, $rec);
+        out(401, ['error' => 'bad_pin', 'left' => PIN_TRIES - $rec['fails']]);
+    });
+}
+
+case 'POST pin_clear': {
+    $u = require_user();
+    $file = $pinFile($body['deviceId'] ?? null);
+    $rec = read_json($file);
+    if ($rec && ($rec['user'] ?? null) === $u) { @unlink($file); @unlink($file . '.lock'); }
     out(200, ['ok' => true]);
 }
 

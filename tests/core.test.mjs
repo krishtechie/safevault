@@ -24,23 +24,84 @@ test('same password and salt give the same keys, different password does not', a
   const c = await core.deriveKeys('correct horse battery stapl3', salt, kdf);
   assert.equal(a.auth, b.auth);
   assert.notEqual(a.auth, c.auth);
+  assert.deepEqual(a.legacyRaw, b.legacyRaw);
   assert.equal(core.b64.dec(a.auth).length, 32);
-  assert.equal(a.encKey.extractable, false);
+  assert.equal(a.kek.extractable, false);
+  assert.notEqual(core.b64.enc(a.legacyRaw), a.auth); // sign-in key and vault key are unrelated
 });
 
 test('vault round trip, wrong key, wrong user and tampering all behave', async () => {
-  const a = await core.deriveKeys('pw-one-long-enough', salt, kdf);
-  const b = await core.deriveKeys('pw-two-long-enough', salt, kdf);
-  const items = [{ id: '1', title: 'Bank', password: 'p@ss ünïcode 🔑', updatedAt: 1 }];
-  const blob = await core.encryptVault(a.encKey, 'user', items);
+  const a = await core.importVaultKey(core.newVaultKeyRaw());
+  const b = await core.importVaultKey(core.newVaultKeyRaw());
+  assert.equal(a.extractable, false);
+  const items = core.sanitizeItems([{ id: '1', title: 'Bank', password: 'p@ss ünïcode 🔑', updatedAt: 1 }]);
+  const blob = await core.encryptVault(a, 'user', items);
   assert.ok(!blob.includes('Bank'));
-  assert.deepEqual(await core.decryptVault(a.encKey, 'user', blob), items);
-  await assert.rejects(core.decryptVault(b.encKey, 'user', blob));
-  await assert.rejects(core.decryptVault(a.encKey, 'other', blob));
+  assert.deepEqual(await core.decryptVault(a, 'user', blob), items);
+  await assert.rejects(core.decryptVault(b, 'user', blob));
+  await assert.rejects(core.decryptVault(a, 'other', blob));
   const o = JSON.parse(blob); const ct = core.b64.dec(o.ct); ct[0] ^= 1; o.ct = core.b64.enc(ct);
-  await assert.rejects(core.decryptVault(a.encKey, 'user', JSON.stringify(o)));
-  const blob2 = await core.encryptVault(a.encKey, 'user', items);
+  await assert.rejects(core.decryptVault(a, 'user', JSON.stringify(o)));
+  const blob2 = await core.encryptVault(a, 'user', items);
   assert.notEqual(JSON.parse(blob).iv, JSON.parse(blob2).iv); // fresh nonce each save
+});
+
+test('vaults made before key wrapping still open (same key bytes as the old derivation)', async () => {
+  // The first release derived the vault key directly with HKDF deriveKey. Rebuild that here.
+  const master = await require('../vendor/argon2.umd.min.js').argon2id({
+    password: 'old account password', salt: core.b64.dec(salt), parallelism: 1, iterations: 2, memorySize: 19456, hashLength: 32, outputType: 'binary',
+  });
+  const hk = await crypto.subtle.importKey('raw', master, 'HKDF', false, ['deriveKey']);
+  const oldKey = await crypto.subtle.deriveKey(
+    { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(0), info: new TextEncoder().encode('vault-enc-v1') },
+    hk, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+  const items = core.sanitizeItems([{ id: 'x', title: 'From v1', updatedAt: 5 }]);
+  const oldBlob = await core.encryptVault(oldKey, 'user', items);
+  const keys = await core.deriveKeys('old account password', salt, kdf);
+  assert.deepEqual(await core.decryptVault(await core.importVaultKey(keys.legacyRaw), 'user', oldBlob), items);
+});
+
+test('key wrapping: password change and recovery re-wrap the same vault key', async () => {
+  const vkRaw = core.newVaultKeyRaw();
+  const blob = await core.encryptVault(await core.importVaultKey(vkRaw), 'user', [{ id: '1', updatedAt: 1 }]);
+  const oldPw = await core.deriveKeys('old master password!', salt, kdf);
+  const wrap = await core.wrapKey(oldPw.kek, 'user', vkRaw);
+  assert.ok(!wrap.includes(core.b64.enc(vkRaw)));
+  assert.deepEqual(await core.unwrapKey(oldPw.kek, 'user', wrap), vkRaw);
+  // change password: new salt and key, same vault key, vault blob untouched
+  const salt2 = core.b64.enc(core.randomBytes(16));
+  const newPw = await core.deriveKeys('new master password!', salt2, kdf);
+  const wrap2 = await core.wrapKey(newPw.kek, 'user', await core.unwrapKey(oldPw.kek, 'user', wrap));
+  await assert.rejects(core.unwrapKey(oldPw.kek, 'user', wrap2));
+  await assert.rejects(core.unwrapKey(newPw.kek, 'other', wrap2));
+  await assert.rejects(core.unwrapKey(newPw.kek, 'user', wrap2, 'rec')); // a password wrap cannot pass as a recovery wrap
+  const vk2 = await core.importVaultKey(await core.unwrapKey(newPw.kek, 'user', wrap2));
+  assert.equal((await core.decryptVault(vk2, 'user', blob)).length, 1);
+});
+
+test('recovery key: format, tolerant entry, and independent keys', async () => {
+  const code = core.generateRecoveryCode();
+  assert.match(code, /^([0-9A-HJKMNP-TV-Z]{4}-){7}[0-9A-HJKMNP-TV-Z]{4}$/);
+  assert.notEqual(code, core.generateRecoveryCode());
+  const a = await core.deriveRecoveryKeys(code, 'user');
+  const b = await core.deriveRecoveryKeys(' ' + code.toLowerCase().replaceAll('-', ' ') + ' ', 'user');
+  assert.equal(a.auth, b.auth);
+  assert.notEqual(a.auth, (await core.deriveRecoveryKeys(code, 'other')).auth);
+  assert.equal(core.normalizeRecoveryCode('oOiIlL' + '0'.repeat(26)), '001111' + '0'.repeat(26));
+  await assert.rejects(core.deriveRecoveryKeys('too-short', 'user'));
+  await assert.rejects(core.deriveRecoveryKeys('U'.repeat(32), 'user'));
+  const vkRaw = core.newVaultKeyRaw();
+  const recWrap = await core.wrapKey(a.kek, 'user', vkRaw, 'rec');
+  assert.deepEqual(await core.unwrapKey(b.kek, 'user', recWrap, 'rec'), vkRaw);
+  const wrong = await core.deriveRecoveryKeys(core.generateRecoveryCode(), 'user');
+  await assert.rejects(core.unwrapKey(wrong.kek, 'user', recWrap, 'rec'));
+});
+
+test('sealed text round trip', async () => {
+  const k = await core.importVaultKey(core.newVaultKeyRaw());
+  const sealed = await core.sealText(k, 'sign-in-key');
+  assert.equal(await core.openText(k, sealed), 'sign-in-key');
+  await assert.rejects(core.openText(await core.importVaultKey(core.newVaultKeyRaw()), sealed));
 });
 
 test('weak KDF settings from a server are refused', async () => {
@@ -86,4 +147,69 @@ test('weak and reused detection', () => {
   assert.ok(core.isWeak('summer2024')); assert.ok(core.isWeak('aaaaaaaaaaaaaaaaaaaa')); assert.ok(!core.isWeak(core.generatePassword().value));
   const groups = core.findReused([{ id: 1, password: 'x' }, { id: 2, password: 'x' }, { id: 3, password: 'y' }, { id: 4, password: 'x', deleted: true }]);
   assert.equal(groups.length, 1); assert.equal(groups[0].length, 2);
+});
+
+test('entry form rules: each field accepts only what belongs in it', () => {
+  const ok = { title: ' Bank ', username: " o'brien+tag@example.com ", password: 'correct horse battery', url: 'example.com/login', notes: 'line one\nline two\ttabbed' };
+  assert.deepEqual(core.validateEntry(ok), { title: 'Bank', username: "o'brien+tag@example.com", password: 'correct horse battery', url: 'https://example.com/login', notes: 'line one\nline two\ttabbed' });
+  const bad = (patch, code) => assert.throws(() => core.validateEntry({ ...ok, ...patch }), { message: code });
+  bad({ title: '   ' }, 'need_title');
+  bad({ title: 'x'.repeat(101) }, 'bad_title');
+  bad({ title: 'Bank‮gnp.exe' }, 'bad_title'); // right-to-left override used to disguise text
+  bad({ username: 'two words' }, 'bad_username_field');
+  bad({ username: '<script>alert(1)</script>' }, 'bad_username_field');
+  bad({ username: 'a​b@example.com' }, 'bad_username_field'); // zero-width space
+  bad({ password: '' }, 'need_password');
+  bad({ password: 'has\nnewline' }, 'bad_password');
+  bad({ password: 'x'.repeat(257) }, 'bad_password');
+  bad({ password: ' padded ' }, 'password_spaces');
+  bad({ notes: 'null\u0000byte' }, 'bad_notes');
+  for (const u of ['javascript:alert(1)', 'JaVaScRiPt:alert(1)', 'data:text/html,<script>alert(1)</script>', 'file:///etc/passwd', 'vbscript:x', 'https://user:pw@example.com', 'https://exa mple.com', 'localhost', 'ftp://example.com']) bad({ url: u }, 'bad_url');
+  assert.equal(core.validateEntry({ ...ok, url: '' }).url, '');
+  assert.equal(core.validateEntry({ ...ok, url: 'HTTP://Example.COM' }).url, 'http://example.com/');
+});
+
+test('incoming data is cleaned: unknown fields dropped, hidden characters removed, unsafe links blanked', () => {
+  const dirty = [
+    { id: 'a1', title: '<img src=x onerror=alert(1)>', username: 'me\u0000@x.com', password: 'p​w', url: 'javascript:alert(1)', notes: 'ok\nline\u0007', updatedAt: 5.9, evil: { nested: true }, __proto__: { polluted: 1 } },
+    { id: 'a1', title: 'duplicate id is dropped' },
+    { id: '../../etc', title: 'bad id is dropped' },
+    { id: 'b2', deleted: true, updatedAt: 9, title: 'tombstones keep no content', password: 'x' },
+    { id: 'c3', title: 'T'.repeat(500), password: 42, url: 'example.com' },
+    null, 'string', 7, { title: 'no id' },
+  ];
+  const clean = core.sanitizeItems(dirty);
+  assert.equal(clean.length, 3);
+  assert.deepEqual(clean[0], { id: 'a1', title: '<img src=x onerror=alert(1)>', username: 'me@x.com', password: 'pw', url: '', notes: 'ok\nline', createdAt: 0, updatedAt: 5, deleted: false });
+  assert.deepEqual(clean[1], { id: 'b2', deleted: true, updatedAt: 9 });
+  assert.equal(clean[2].title.length, 100); assert.equal(clean[2].password, ''); assert.equal(clean[2].url, 'https://example.com/');
+  assert.equal({}.polluted, undefined);
+  assert.deepEqual(core.sanitizeItems('not an array'), []);
+});
+
+test('PIN rules and PIN unlock keys', async () => {
+  assert.equal(core.checkPin('284951'), '284951');
+  for (const p of ['12345', '1234567', 'abcdef', '', '12 456']) assert.throws(() => core.checkPin(p), { message: 'pin_format' });
+  for (const p of ['000000', '777777', '123456', '456789', '987654', '890123']) assert.throws(() => core.checkPin(p), { message: 'pin_simple' });
+  const kdev = core.randomBytes(32); const ksrv = core.randomBytes(32);
+  const a = await core.derivePinAuth('284951', kdev);
+  assert.equal(a, await core.derivePinAuth('284951', kdev));
+  assert.notEqual(a, await core.derivePinAuth('284952', kdev));
+  assert.notEqual(a, await core.derivePinAuth('284951', core.randomBytes(32))); // useless without the device half
+  assert.equal(core.b64.dec(a).length, 32);
+  const vkRaw = core.newVaultKeyRaw();
+  const wrap = await core.wrapKey(await core.pinKek(kdev, ksrv), 'user', vkRaw, 'pin');
+  assert.deepEqual(await core.unwrapKey(await core.pinKek(kdev, ksrv), 'user', wrap, 'pin'), vkRaw);
+  await assert.rejects(async () => core.unwrapKey(await core.pinKek(kdev, core.randomBytes(32)), 'user', wrap, 'pin')); // server half missing
+  await assert.rejects(async () => core.unwrapKey(await core.pinKek(core.randomBytes(32), ksrv), 'user', wrap, 'pin')); // device half missing
+  await assert.rejects(async () => core.unwrapKey(await core.pinKek(kdev, ksrv), 'user', wrap, 'pw'));
+  await assert.rejects(core.pinKek(kdev, new Uint8Array(8)));
+});
+
+test('Face ID key: same device secret opens, a different one does not', async () => {
+  const secret = core.randomBytes(32).buffer; const vkRaw = core.newVaultKeyRaw();
+  const wrap = await core.wrapKey(await core.bioKek(secret), 'user', vkRaw, 'bio');
+  assert.deepEqual(await core.unwrapKey(await core.bioKek(secret), 'user', wrap, 'bio'), vkRaw);
+  await assert.rejects(async () => core.unwrapKey(await core.bioKek(core.randomBytes(32).buffer), 'user', wrap, 'bio'));
+  await assert.rejects(core.bioKek(new Uint8Array(4).buffer));
 });

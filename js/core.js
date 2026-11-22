@@ -43,7 +43,14 @@ export function checkKdf(kdf) {
 let argon2idImpl = null;
 export function setArgon2(fn) { argon2idImpl = fn; }
 
-// master password -> Argon2id -> HKDF -> { encKey (stays on device), auth (sent to server) }
+const hkdfParams = (info, salt = new Uint8Array(0)) => ({ name: 'HKDF', hash: 'SHA-256', salt, info: te.encode(info) });
+const aesKey = (hk, info, salt) => crypto.subtle.deriveKey(
+  hkdfParams(info, salt), hk, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+
+// master password -> Argon2id -> HKDF -> three separate keys:
+//   kek       wraps the vault key (stays on device)
+//   legacyRaw the vault key of accounts created before key wrapping (stays on device)
+//   auth      sign-in key (sent to server, which stores only a hash of it)
 export async function deriveKeys(password, saltB64, kdfIn) {
   const kdf = checkKdf(kdfIn);
   const salt = b64.dec(saltB64);
@@ -59,11 +66,118 @@ export async function deriveKeys(password, saltB64, kdfIn) {
   });
   const hk = await crypto.subtle.importKey('raw', master, 'HKDF', false, ['deriveKey', 'deriveBits']);
   master.fill(0);
-  const params = (info) => ({ name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(0), info: te.encode(info) });
-  const encKey = await crypto.subtle.deriveKey(
-    params('vault-enc-v1'), hk, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
-  const authBits = await crypto.subtle.deriveBits(params('vault-auth-v1'), hk, 256);
-  return { encKey, auth: b64.enc(new Uint8Array(authBits)) };
+  const kek = await aesKey(hk, 'vault-kek-v1');
+  const legacyRaw = new Uint8Array(await crypto.subtle.deriveBits(hkdfParams('vault-enc-v1'), hk, 256));
+  const authBits = await crypto.subtle.deriveBits(hkdfParams('vault-auth-v1'), hk, 256);
+  return { kek, legacyRaw, auth: b64.enc(new Uint8Array(authBits)) };
+}
+
+/* ---------- Vault key and key wrapping ---------- */
+
+// The vault key encrypts the vault and never changes. Changing the master password or
+// recovering the account only re-wraps this key, so the vault data itself is never rewritten.
+export const newVaultKeyRaw = () => randomBytes(32);
+
+export function importVaultKey(raw) {
+  return crypto.subtle.importKey('raw', raw, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+}
+
+const wrapAad = (kind, username) => te.encode(`vault-wrap-v1|${kind}|${username}`);
+
+// kind is 'pw' (wrapped by the master password key) or 'rec' (wrapped by the recovery key).
+export async function wrapKey(kek, username, raw, kind = 'pw') {
+  const iv = randomBytes(12);
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: wrapAad(kind, username) }, kek, raw);
+  return JSON.stringify({ v: 1, iv: b64.enc(iv), ct: b64.enc(new Uint8Array(ct)) });
+}
+
+export async function unwrapKey(kek, username, wrap, kind = 'pw') {
+  const o = JSON.parse(wrap);
+  if (o.v !== 1) throw new Error('Unknown key format.');
+  const raw = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: b64.dec(o.iv), additionalData: wrapAad(kind, username) }, kek, b64.dec(o.ct));
+  if (raw.byteLength !== 32) throw new Error('Bad key.');
+  return new Uint8Array(raw);
+}
+
+// Small strings (the sign-in key) encrypted under the vault key for the stay-unlocked feature.
+export async function sealText(key, text) {
+  const iv = randomBytes(12);
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, te.encode(text));
+  return { iv: b64.enc(iv), ct: b64.enc(new Uint8Array(ct)) };
+}
+export async function openText(key, sealed) {
+  return td.decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64.dec(sealed.iv) }, key, b64.dec(sealed.ct)));
+}
+
+/* ---------- Quick unlock: PIN and Face ID / Touch ID ---------- */
+
+// Six digits, and not an obvious one.
+export function checkPin(pin) {
+  if (!/^\d{6}$/.test(pin)) throw new Error('pin_format');
+  if (/^(\d)\1{5}$/.test(pin) || '01234567890123456789'.includes(pin) || '98765432109876543210'.includes(pin)) throw new Error('pin_simple');
+  return pin;
+}
+
+// What the server checks. It is salted with a random value kept only on this device, so a
+// stolen server file alone cannot be used to guess the PIN.
+export async function derivePinAuth(pin, kdev) {
+  const slow = await argon2idImpl({
+    password: pin, salt: kdev.slice(0, 16), parallelism: 1, iterations: 2, memorySize: 19456, hashLength: 32, outputType: 'binary',
+  });
+  const hk = await crypto.subtle.importKey('raw', slow, 'HKDF', false, ['deriveBits']);
+  slow.fill(0);
+  return b64.enc(new Uint8Array(await crypto.subtle.deriveBits(hkdfParams('vault-pin-auth-v1', kdev), hk, 256)));
+}
+
+// The key that wraps the vault key for PIN unlock is built from two random halves: one stored
+// on the device, one held by the server and released only for the right PIN (three tries).
+export async function pinKek(kdev, ksrv) {
+  if (kdev.length !== 32 || ksrv.length !== 32) throw new Error('Bad key.');
+  const ikm = new Uint8Array(64);
+  ikm.set(kdev, 0);
+  ikm.set(ksrv, 32);
+  const hk = await crypto.subtle.importKey('raw', ikm, 'HKDF', false, ['deriveKey']);
+  ikm.fill(0);
+  return aesKey(hk, 'vault-pin-kek-v1');
+}
+
+// Face ID / Touch ID: the device's secure hardware returns a secret only after a successful
+// face or fingerprint check (WebAuthn PRF). That secret becomes the wrapping key.
+export async function bioKek(secret) {
+  const bytes = new Uint8Array(secret);
+  if (bytes.length < 32) throw new Error('Bad key.');
+  const hk = await crypto.subtle.importKey('raw', bytes, 'HKDF', false, ['deriveKey']);
+  return aesKey(hk, 'vault-bio-kek-v1');
+}
+
+/* ---------- Recovery key ---------- */
+
+// 160 random bits shown as 8 groups of 4 characters. No I, L, O or U, to avoid misreading.
+const B32 = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+
+export function generateRecoveryCode() {
+  const bytes = randomBytes(20);
+  let bits = '';
+  for (const b of bytes) bits += b.toString(2).padStart(8, '0');
+  let out = '';
+  for (let i = 0; i < 160; i += 5) out += B32[parseInt(bits.slice(i, i + 5), 2)];
+  return out.match(/.{4}/g).join('-');
+}
+
+export function normalizeRecoveryCode(input) {
+  const s = String(input).toUpperCase().replace(/[^0-9A-Z]/g, '').replace(/O/g, '0').replace(/[IL]/g, '1');
+  if (s.length !== 32 || [...s].some((c) => !B32.includes(c))) throw new Error('bad_recovery_code');
+  return s;
+}
+
+// The recovery code has 160 bits of entropy, so a plain HKDF is enough (no slow hashing needed).
+export async function deriveRecoveryKeys(code, username) {
+  const hk = await crypto.subtle.importKey('raw', te.encode(normalizeRecoveryCode(code)), 'HKDF', false, ['deriveKey', 'deriveBits']);
+  const salt = te.encode('vault-recovery|' + username);
+  const kek = await aesKey(hk, 'vault-rec-kek-v1', salt);
+  const authBits = await crypto.subtle.deriveBits(hkdfParams('vault-rec-auth-v1', salt), hk, 256);
+  return { kek, auth: b64.enc(new Uint8Array(authBits)) };
 }
 
 /* ---------- Vault encryption (AES-256-GCM) ---------- */
@@ -83,7 +197,72 @@ export async function decryptVault(encKey, username, blob) {
   const pt = await crypto.subtle.decrypt(
     { name: 'AES-GCM', iv: b64.dec(o.iv), additionalData: aad(username) }, encKey, b64.dec(o.ct));
   const data = JSON.parse(td.decode(pt));
-  return Array.isArray(data.items) ? data.items : [];
+  return sanitizeItems(data.items);
+}
+
+/* ---------- Field rules ---------- */
+
+// Characters that never belong in a credential: control codes, zero-width characters and
+// text-direction overrides (used to disguise text).
+const HIDDEN_SRC = '\\u0000-\\u001f\\u007f-\\u009f\\u200b-\\u200f\\u2028-\\u202e\\u2060-\\u2069\\ufeff';
+const NOTES_SRC = '\\u0000-\\u0008\\u000b\\u000c\\u000e-\\u001f\\u007f-\\u009f\\u200b-\\u200f\\u2028-\\u202e\\u2060-\\u2069\\ufeff';
+const hidden = (v) => new RegExp('[' + HIDDEN_SRC + ']').test(v);
+const hiddenNotes = (v) => new RegExp('[' + NOTES_SRC + ']').test(v); // notes may keep line breaks and tabs
+export const LIMITS = Object.freeze({ title: 100, username: 254, password: 256, url: 2048, notes: 5000 });
+
+// Returns '' for empty input or a normalized http(s) address. Anything else (javascript:, data:, file:) is refused.
+export function normalizeUrl(input) {
+  const raw = String(input ?? '').trim();
+  if (!raw) return '';
+  if (raw.length > LIMITS.url || hidden(raw) || /\s/.test(raw)) throw new Error('bad_url');
+  let u;
+  try { u = new URL(/^[a-z][a-z0-9+.-]*:/i.test(raw) ? raw : 'https://' + raw); } catch { throw new Error('bad_url'); }
+  if ((u.protocol !== 'https:' && u.protocol !== 'http:') || !u.hostname.includes('.') || u.username || u.password) throw new Error('bad_url');
+  return u.href;
+}
+
+// Checks what was typed into the entry form. Throws an error code naming the first problem.
+export function validateEntry(d) {
+  const title = String(d.title ?? '').trim();
+  const username = String(d.username ?? '').trim();
+  const password = String(d.password ?? '');
+  const notes = String(d.notes ?? '');
+  if (!title) throw new Error('need_title');
+  if (title.length > LIMITS.title || hidden(title)) throw new Error('bad_title');
+  if (username.length > LIMITS.username || hidden(username) || /[\s<>"`\\]/.test(username)) throw new Error('bad_username_field');
+  if (!password) throw new Error('need_password');
+  if (password.length > LIMITS.password || hidden(password)) throw new Error('bad_password');
+  if (password !== password.trim()) throw new Error('password_spaces');
+  if (notes.length > LIMITS.notes || hiddenNotes(notes)) throw new Error('bad_notes');
+  return { title, username, password, url: normalizeUrl(d.url), notes };
+}
+
+// Everything read from the server, the device copy or a backup file passes through here:
+// unknown fields are dropped, text is cleaned and cut to length, unsafe addresses are blanked.
+export function sanitizeItems(items) {
+  const out = [];
+  const seen = new Set();
+  const text = (v, max, src = HIDDEN_SRC) => (typeof v === 'string' ? v.replace(new RegExp('[' + src + ']', 'g'), '').slice(0, max) : '');
+  const time = (v) => (Number.isFinite(v) && v > 0 ? Math.floor(v) : 0);
+  for (const it of Array.isArray(items) ? items : []) {
+    if (!it || typeof it !== 'object' || typeof it.id !== 'string' || !/^[A-Za-z0-9_+/=-]{1,64}$/.test(it.id) || seen.has(it.id)) continue;
+    seen.add(it.id);
+    if (it.deleted === true) { out.push({ id: it.id, deleted: true, updatedAt: time(it.updatedAt) }); continue; }
+    let url = '';
+    try { url = normalizeUrl(it.url); } catch { /* blank it */ }
+    out.push({
+      id: it.id,
+      title: text(it.title, LIMITS.title).trim(),
+      username: text(it.username, LIMITS.username).trim(),
+      password: text(it.password, LIMITS.password),
+      url,
+      notes: text(it.notes, LIMITS.notes, NOTES_SRC),
+      createdAt: time(it.createdAt),
+      updatedAt: time(it.updatedAt),
+      deleted: false,
+    });
+  }
+  return out;
 }
 
 /* ---------- Sync merge ---------- */

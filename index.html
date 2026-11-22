@@ -6,7 +6,12 @@
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://api.pwnedpasswords.com; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow">
-<meta name="theme-color" content="#0a1020">
+<meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Vault">
+<meta name="format-detection" content="telephone=no">
 <title>Vault</title>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icons/icon-192.png">
@@ -17,30 +22,37 @@
 
 <!-- Unlock / create account -->
 <main id="auth" class="auth">
-  <form id="authForm" class="card auth-card" autocomplete="off">
-    <img class="mark" src="icons/icon-192.png" alt="" width="56" height="56">
+  <form id="authForm" class="card auth-card" autocomplete="off" novalidate>
+    <img class="mark" src="icons/icon-192.png" alt="" width="64" height="64">
     <h1>Vault</h1>
     <p id="authLead" class="muted">Unlock with your master password.</p>
 
-    <label>Username
-      <input id="aUser" type="text" autocapitalize="none" autocorrect="off" spellcheck="false" required minlength="3" maxlength="32">
+    <label id="userField">Username
+      <input id="aUser" type="text" inputmode="email" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" minlength="3" maxlength="32">
     </label>
-    <label>Master password
-      <input id="aPass" type="password" required autocomplete="off">
+    <label id="recField" hidden>Recovery key
+      <input id="aRec" type="text" autocapitalize="characters" autocorrect="off" spellcheck="false" autocomplete="off" placeholder="XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX">
     </label>
-    <div id="regFields" hidden>
-      <label>Confirm master password
-        <input id="aPass2" type="password" autocomplete="off">
-      </label>
-      <label>Invite code
-        <input id="aInvite" type="password" autocomplete="off">
-      </label>
-      <p class="note">There is no reset. If you forget the master password, the vault cannot be opened by anyone, including the server owner.</p>
-    </div>
+    <label id="passField"><span id="aPassLabel">Master password</span>
+      <input id="aPass" type="password" autocomplete="off">
+    </label>
+    <label id="confirmField" hidden>Confirm master password
+      <input id="aPass2" type="password" autocomplete="off">
+    </label>
+    <label id="inviteField" hidden>Invite code
+      <input id="aInvite" type="password" autocomplete="off">
+    </label>
+    <label id="pinField" hidden>PIN
+      <input id="aPin" class="pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="off">
+    </label>
+    <p id="regNote" class="note" hidden>Create a recovery key in Settings after signing up. Without one, a forgotten master password cannot be reset by anyone, including the server owner.</p>
 
     <button id="authBtn" class="btn primary" type="submit">Unlock</button>
+    <button id="bioBtn" class="btn" type="button" hidden>Unlock with Face ID</button>
     <p id="authMsg" class="msg" role="alert"></p>
+    <button id="authSwitch" class="link" type="button" hidden>Use master password</button>
     <button id="authToggle" class="link" type="button">Create an account</button>
+    <button id="authForgot" class="link" type="button">Forgot master password?</button>
   </form>
 </main>
 
@@ -49,10 +61,10 @@
   <nav class="side">
     <div class="brand"><img src="icons/icon-192.png" alt="" width="28" height="28"><span>Vault</span></div>
     <div class="tabs">
-      <button class="tab active" data-view="vault" type="button">Passwords</button>
-      <button class="tab" data-view="generator" type="button">Generator</button>
-      <button class="tab" data-view="health" type="button">Health</button>
-      <button class="tab" data-view="settings" type="button">Settings</button>
+      <button class="tab active" data-view="vault" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="10" width="16" height="11" rx="3"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg><span>Passwords</span></button>
+      <button class="tab" data-view="generator" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 0 1 13.700-5.600L20 8"/><path d="M20 4v4h-4"/><path d="M20 12a8 8 0 0 1-13.700 5.600L4 16"/><path d="M4 20v-4h4"/></svg><span>Generator</span></button>
+      <button class="tab" data-view="health" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v6c0 4.400-3 7.600-7 9-4-1.400-7-4.600-7-9V6z"/><path d="M9 12l2 2 4-4"/></svg><span>Health</span></button>
+      <button class="tab" data-view="settings" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg><span>Settings</span></button>
     </div>
     <div class="side-foot">
       <button id="syncBtn" class="status" type="button" title="Sync now"><span id="syncDot" class="dot"></span><span id="syncText">Starting</span></button>
@@ -61,12 +73,14 @@
   </nav>
 
   <div class="content">
+    <div id="offlineBar" class="offline-bar" role="status" hidden>You are offline. Changes are saved on this device and will sync when you are back online.</div>
     <header class="topbar">
       <button id="syncBtnM" class="status" type="button"><span id="syncDotM" class="dot"></span><span id="syncTextM">Starting</span></button>
       <button id="lockBtnM" class="btn ghost small" type="button">Lock</button>
     </header>
 
     <section id="view-vault" class="view">
+      <h2>Passwords</h2>
       <div class="row head">
         <input id="search" type="search" placeholder="Search passwords" autocomplete="off">
         <button id="addBtn" class="btn primary" type="button">Add</button>
@@ -131,6 +145,66 @@
             <option value="30">30 minutes</option>
           </select>
         </label>
+        <label class="check"><input id="stayUnlocked" type="checkbox" checked> Stay unlocked when the page reloads</label>
+        <p class="muted">Keeps the vault open through a refresh until the auto-lock time passes or you tap Lock. Turn this off on a shared computer.</p>
+      </div>
+      <div class="card">
+        <h3>Quick unlock</h3>
+        <p class="muted">Open the vault on this device with a 6-digit PIN or with Face ID or Touch ID, instead of typing the master password each time. Three wrong PINs in a row turn the PIN off, and the master password is needed again.</p>
+        <label>Current master password
+          <input id="qPass" type="password" autocomplete="off">
+        </label>
+        <div class="split">
+          <label>New PIN
+            <input id="qPin" class="pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="off">
+          </label>
+          <label>Confirm PIN
+            <input id="qPin2" class="pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="off">
+          </label>
+        </div>
+        <div class="row wrap">
+          <button id="pinBtn" class="btn" type="button">Set PIN</button>
+          <button id="pinOff" class="btn danger" type="button" hidden>Turn off PIN</button>
+        </div>
+        <p id="pinMsg" class="msg"></p>
+        <hr>
+        <div class="row wrap">
+          <button id="bioOn" class="btn" type="button">Turn on Face ID</button>
+          <button id="bioOff" class="btn danger" type="button" hidden>Turn off Face ID</button>
+        </div>
+        <p id="bioMsg" class="msg"></p>
+      </div>
+      <div class="card">
+        <h3>Master password</h3>
+        <label>Current master password
+          <input id="cpCur" type="password" autocomplete="off">
+        </label>
+        <label>New master password
+          <input id="cpNew" type="password" autocomplete="off">
+        </label>
+        <label>Confirm new master password
+          <input id="cpNew2" type="password" autocomplete="off">
+        </label>
+        <button id="cpBtn" class="btn" type="button">Change master password</button>
+        <p id="cpMsg" class="msg"></p>
+      </div>
+      <div class="card">
+        <h3>Recovery key</h3>
+        <p id="recStatus" class="muted"></p>
+        <p class="muted">A recovery key lets you set a new master password if you forget it. Anyone who has it and your username can open your vault, so keep it on paper somewhere safe, not in this vault and not in a photo.</p>
+        <label>Current master password
+          <input id="recPass" type="password" autocomplete="off">
+        </label>
+        <button id="recBtn" class="btn" type="button">Create recovery key</button>
+        <p id="recMsg" class="msg"></p>
+        <div id="recOut" class="fix" hidden>
+          <p>Write this down now:</p>
+          <output id="recCode" class="rec-code"></output>
+          <div class="row">
+            <button id="recCopy" class="btn small" type="button">Copy</button>
+            <button id="recHide" class="btn small" type="button">I have saved it</button>
+          </div>
+        </div>
       </div>
       <div class="card">
         <h3>Backup</h3>
@@ -157,7 +231,7 @@
 
 <!-- Entry editor -->
 <dialog id="itemDlg" class="dlg">
-  <form id="itemForm" method="dialog" autocomplete="off">
+  <form id="itemForm" method="dialog" autocomplete="off" novalidate>
     <h2 id="itemTitle">New password</h2>
     <div id="fixBox" class="fix" hidden>
       <p id="fixWhy"></p>
@@ -169,28 +243,29 @@
       <a id="fixOpen" class="btn small" target="_blank" rel="noopener noreferrer" hidden>Open website</a>
     </div>
     <label>Name
-      <input id="fTitle" type="text" required maxlength="200" placeholder="e.g. Bank">
+      <input id="fTitle" type="text" required maxlength="100" autocomplete="off" autocapitalize="words" placeholder="e.g. Bank">
     </label>
     <label>Username or email
       <span class="with-btn">
-        <input id="fUser" type="text" maxlength="300" autocapitalize="none" spellcheck="false">
+        <input id="fUser" type="text" inputmode="email" maxlength="254" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
         <button id="fUserCopy" class="btn small" type="button">Copy</button>
       </span>
     </label>
     <label>Password
       <span class="with-btn">
-        <input id="fPass" type="password" maxlength="1000" autocomplete="off" spellcheck="false">
+        <input id="fPass" type="password" required maxlength="256" autocomplete="new-password" autocapitalize="none" autocorrect="off" spellcheck="false">
         <button id="fShow" class="btn small" type="button">Show</button>
         <button id="fPassCopy" class="btn small" type="button">Copy</button>
       </span>
     </label>
     <button id="fGen" class="link" type="button">Generate a strong password</button>
     <label>Website
-      <input id="fUrl" type="text" maxlength="500" autocapitalize="none" spellcheck="false" placeholder="https://">
+      <input id="fUrl" type="url" inputmode="url" maxlength="2048" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="https://">
     </label>
     <label>Notes
-      <textarea id="fNotes" rows="3" maxlength="5000"></textarea>
+      <textarea id="fNotes" rows="3" maxlength="5000" autocomplete="off"></textarea>
     </label>
+    <p id="itemMsg" class="msg" role="alert"></p>
     <div class="row end">
       <button id="fDelete" class="btn danger" type="button" hidden>Delete</button>
       <span class="grow"></span>

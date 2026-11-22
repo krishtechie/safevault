@@ -9,13 +9,20 @@ Runs on ordinary shared hosting (PHP 8.1+, no database). The front end is plain 
 | Area | Design |
 |---|---|
 | Master password | Never stored and never sent to the server |
-| Key derivation | Argon2id (64 MiB, 3 passes), then HKDF-SHA256 splits the result into an encryption key and a separate sign-in key |
-| Vault encryption | AES-256-GCM in the browser (Web Crypto), fresh random nonce on every save, username bound as associated data |
+| Key derivation | Argon2id (64 MiB, 3 passes), then HKDF-SHA256 splits the result into a key-wrapping key and a separate sign-in key |
+| Vault encryption | AES-256-GCM in the browser (Web Crypto) with a random vault key, fresh random nonce on every save, username bound as associated data |
+| Key wrapping | The vault key is stored only in wrapped (encrypted) form. Changing the master password re-wraps the key and never rewrites the vault |
+| Recovery | Optional recovery key (160 random bits, shown once). It wraps the same vault key, so a forgotten master password can be replaced without the server ever being able to open the vault |
+| PIN unlock | Optional, per device. The key that opens the vault is split in two random halves: one on the device, one on the server. The server releases its half only for the right PIN and destroys it after three wrong tries, after which the master password is required. Needs a connection |
+| Face ID / Touch ID | Optional, per device. Uses a passkey with the WebAuthn PRF extension: the device's secure hardware releases a secret only after a successful face or fingerprint check. Works offline |
+| Stay unlocked | Optional. The vault key is held as a non-extractable browser key until the auto-lock time passes, so a page reload does not ask for the password again |
 | Server knowledge | Only a bcrypt hash of the sign-in key and the encrypted vault blob. A full server breach exposes no passwords |
 | Sync | Revision numbers with conflict detection. Devices merge per entry (newest edit wins, deletions sync) |
-| Offline | An encrypted copy is kept on each device, so the vault opens without internet and syncs later |
+| Offline | An encrypted copy is kept on each device, so the vault opens without internet. An offline notice shows, and changes sync by themselves once the connection returns |
 | Leak check | Have I Been Pwned range API with k-anonymity: only the first 5 characters of a SHA-1 hash leave the device |
 | Generator | `crypto.getRandomValues` with rejection sampling (no modulo bias). Random characters or EFF wordlist passphrases |
+| Field rules | Every entry field is validated (no hidden or control characters, usernames without spaces or markup, website addresses limited to http and https). Data read from the server or a backup is cleaned the same way before use |
+| Script injection | All text is written to the page as plain text, never as HTML. Combined with the Content Security Policy, pasted or imported markup cannot run |
 | Browser hardening | Strict Content Security Policy, no third-party scripts, no inline code, auto-lock, clipboard cleared after 30 seconds |
 | API hardening | Invite-only sign-up, login throttling, HttpOnly SameSite=Strict session cookie, cross-site requests rejected, account enumeration blocked, data folder forced outside the web root |
 
@@ -39,13 +46,14 @@ Runs on ordinary shared hosting (PHP 8.1+, no database). The front end is plain 
 node --test tests/core.test.mjs
 ```
 
-Covers key derivation (cross-checked against libsodium), encryption round trips and tamper detection, merge rules, generator output, and the leak-check protocol.
+Covers key derivation (cross-checked against libsodium), encryption round trips and tamper detection, key wrapping, recovery keys, compatibility with vaults from the first release, merge rules, generator output, and the leak-check protocol.
 
 ## Limits to know about
 
 - This project has not had an independent security audit. Keep an encrypted backup (Settings) and a second copy of critical passwords until you trust it.
-- There is no password reset. A forgotten master password means the vault cannot be opened.
-- Not in this version: changing the master password, two-factor sign-in, browser autofill, import from other password managers.
+- A forgotten master password can only be replaced with the recovery key. With neither, the vault cannot be opened by anyone.
+- Not in this version: two-factor sign-in, browser autofill, import from other password managers.
+- PIN unlock protects against someone who has the device but not the PIN. Someone holding both the device's storage and the server's files could try all PINs, so the master password remains the real key.
 - Passwords are in memory while the vault is unlocked, so a compromised device or malicious browser extension can still read them. That is true of every password manager.
 
 ## Third-party code
