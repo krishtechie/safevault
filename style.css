@@ -136,6 +136,14 @@ a.btn { display: inline-flex; align-items: center; text-decoration: none; }
 
 .content { flex: 1; min-width: 0; }
 .topbar { display: none; }
+.alert-bar { background: var(--danger); color: #fff; padding: 14px 18px; font-size: 14px; line-height: 1.4; }
+.alert-bar strong { display: block; font-size: 16px; margin-bottom: 4px; }
+.alert-bar p { margin: 0 0 10px; }
+.alert-bar .btn { background: #fff; color: var(--danger); }
+.qr { width: 200px; max-width: 100%; margin: 4px 0 12px; border-radius: 12px; overflow: hidden; }
+.qr svg { display: block; width: 100%; height: auto; }
+.fix label { margin-top: 12px; color: var(--text); }
+.fix input.pin { background: var(--panel); }
 .offline-bar { background: var(--warn-soft); color: var(--warn); font-size: 13px; font-weight: 500; padding: 10px 16px; text-align: center; line-height: 1.35; }
 .view { max-width: 700px; margin: 0 auto; padding: 34px 24px 48px; }
 .head { margin-bottom: 18px; }

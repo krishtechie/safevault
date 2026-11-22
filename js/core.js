@@ -419,6 +419,12 @@ export const LOG_EVENTS = Object.freeze({
   recover_ok: ['Account recovered with the recovery key', 'change'],
   recover_fail: ['Failed recovery attempt: wrong recovery key', 'fail'],
   save: ['Vault changes saved', 'save'],
+  restore: ['Vault restored from a device after the server copy went backwards', 'change'],
+  rollback_seen: ['A device found an older or swapped vault copy on the server', 'fail'],
+  totp_on: ['Two-factor sign-in turned on', 'change'],
+  totp_off: ['Two-factor sign-in turned off', 'change'],
+  totp_fail: ['Wrong authenticator code after a correct master password', 'fail'],
+  device_trusted: ['New device approved with an authenticator code', 'change'],
   login_blocked: ['Sign-in blocked for 15 minutes after 5 wrong tries', 'fail'],
   recover_blocked: ['Recovery blocked for 15 minutes after 5 wrong tries', 'fail'],
   // The lines below reach only the server owner: attempts on names that do not exist or on other accounts.
@@ -519,4 +525,39 @@ export function importCsv(text, existing = []) {
     items.push(clean);
   });
   return { items, duplicates, skipped };
+}
+
+/* ---------- Rollback detection ---------- */
+
+export async function sha256Hex(text) {
+  const d = new Uint8Array(await crypto.subtle.digest('SHA-256', te.encode(text)));
+  return [...d].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+// Compares what this device last saw with what the server now offers.
+// 'older'   the server's version number went backwards (an old copy was put back)
+// 'swapped' same version number, different content
+// null      normal: the server copy is the same or newer
+export function checkRollback(localRev, localHash, remoteRev, remoteHash) {
+  if (remoteRev < localRev) return 'older';
+  if (remoteRev === localRev && localHash && remoteHash !== localHash) return 'swapped';
+  return null;
+}
+
+/* ---------- Two-factor sign-in ---------- */
+
+const B32_RFC = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+
+// A new 160-bit authenticator secret, in the base32 form authenticator apps expect.
+export function newTotpSecret() {
+  let bits = '';
+  for (const b of randomBytes(20)) bits += b.toString(2).padStart(8, '0');
+  let out = '';
+  for (let i = 0; i < 160; i += 5) out += B32_RFC[parseInt(bits.slice(i, i + 5), 2)];
+  return out;
+}
+
+// The address a QR code or "add to authenticator" link carries.
+export function otpauthUri(secret, username, issuer = 'Vault') {
+  return `otpauth://totp/${encodeURIComponent(issuer)}:${encodeURIComponent(username)}?secret=${secret}&issuer=${encodeURIComponent(issuer)}&algorithm=SHA1&digits=6&period=30`;
 }

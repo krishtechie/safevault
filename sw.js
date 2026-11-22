@@ -1,8 +1,8 @@
 // Offline support for the app shell only. API calls are never cached or intercepted.
-const CACHE = 'vault-shell-v9';
+const CACHE = 'vault-shell-v10';
 const SHELL = [
   './', 'index.html', 'style.css', 'js/app.js', 'js/core.js',
-  'vendor/argon2.umd.min.js', 'vendor/wordlist.js',
+  'vendor/argon2.umd.min.js', 'vendor/qrcode.js', 'vendor/wordlist.js',
   'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png',
 ];
 

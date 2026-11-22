@@ -246,7 +246,7 @@ $geo = function (array $ips) use ($cfg, $dataDir): array {
         if (!filter_var($addr, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) continue;
         $file = $dataDir . '/geo/' . hash('sha256', $addr) . '.json';
         $hit = read_json($file);
-        if ($hit && ($hit['v'] ?? 0) === 2 && (int)($hit['until'] ?? 0) > time()) {
+        if ($hit && ($hit['v'] ?? 0) === 3 && (int)($hit['until'] ?? 0) > time()) {
             if (($hit['where'] ?? '') !== '') $out[$addr] = $hit['where'];
             continue;
         }
@@ -278,8 +278,23 @@ $geo = function (array $ips) use ($cfg, $dataDir): array {
             }
         }
         $where = implode(', ', $parts);
+        // Relay and VPN addresses (Apple Private Relay runs on Cloudflare, Akamai and Fastly) belong to the
+        // relay company, so the city on record for them says nothing about where the person is.
+        if (is_array($j)) {
+            $org = '';
+            foreach (['asnOrganization', 'org', 'isp', 'asn_org'] as $k) {
+                if (is_string($j[$k] ?? null) && trim($j[$k]) !== '') {
+                    $org = mb_substr(trim((string)preg_replace('/[\x00-\x1f\x7f<>]/u', '', $j[$k])), 0, 40);
+                    break;
+                }
+            }
+            $proxy = ($j['isProxy'] ?? false) === true || ($j['proxy'] ?? false) === true;
+            if ($proxy || preg_match('/cloudflare|akamai|fastly|private relay|icloud|vpn|proxy/i', $org)) {
+                $where = 'Private relay or VPN' . ($org !== '' ? " ($org)" : '') . ', real location hidden';
+            }
+        }
         // A failed lookup is retried after an hour, a good one is kept for 30 days.
-        write_json($file, ['v' => 2, 'where' => $where, 'until' => time() + ($where === '' ? 3600 : 30 * 86400)]);
+        write_json($file, ['v' => 3, 'where' => $where, 'until' => time() + ($where === '' ? 3600 : 30 * 86400)]);
         $tried++;
         if ($where !== '') { $out[$addr] = $where; $found++; }
     }
@@ -331,6 +346,58 @@ $clearPins = function (string $u) use ($dataDir): void {
     }
 };
 const PIN_TRIES = 3;
+
+/* ---------- Two-factor sign-in (authenticator app codes, RFC 6238) ---------- */
+
+function b32_decode(string $in): ?string {
+    $map = array_flip(str_split('ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'));
+    $in = strtoupper((string)preg_replace('/[\s=-]/', '', $in));
+    if ($in === '' || preg_match('/[^A-Z2-7]/', $in)) return null;
+    $bits = '';
+    foreach (str_split($in) as $c) $bits .= str_pad(decbin($map[$c]), 5, '0', STR_PAD_LEFT);
+    $out = '';
+    foreach (str_split(substr($bits, 0, intdiv(strlen($bits), 8) * 8), 8) as $byte) $out .= chr(bindec($byte));
+    return $out;
+}
+function totp_code(string $key, int $counter): string {
+    $h = hash_hmac('sha1', pack('J', $counter), $key, true);
+    $o = ord($h[19]) & 0x0f;
+    $n = ((ord($h[$o]) & 0x7f) << 24) | (ord($h[$o + 1]) << 16) | (ord($h[$o + 2]) << 8) | ord($h[$o + 3]);
+    return str_pad((string)($n % 1000000), 6, '0', STR_PAD_LEFT);
+}
+// Returns the matching time step (so a code cannot be used twice) or null. Accepts one step either side for clock drift.
+function totp_match(string $key, mixed $code, int $lastStep): ?int {
+    if (!is_string($code) || !preg_match('/^\d{6}$/', $code)) return null;
+    $now = intdiv(time(), 30);
+    foreach ([0, -1, 1] as $d) {
+        $step = $now + $d;
+        if ($step > $lastStep && hash_equals(totp_code($key, $step), $code)) return $step;
+    }
+    return null;
+}
+// The authenticator secret is stored encrypted with a key derived from the server secret in config.php,
+// so the data folder alone does not reveal it.
+$totpKey = hash_hmac('sha256', 'totp-storage-v1', $secret, true);
+$totpSeal = function (string $raw) use ($totpKey): string {
+    $iv = random_bytes(12);
+    $ct = openssl_encrypt($raw, 'aes-256-gcm', $totpKey, OPENSSL_RAW_DATA, $iv, $tag);
+    if ($ct === false) fail(500, 'crypto_unavailable');
+    return base64_encode($iv . $tag . $ct);
+};
+$totpOpen = function (mixed $sealed) use ($totpKey): ?string {
+    $bin = is_string($sealed) ? base64_decode($sealed, true) : false;
+    if ($bin === false || strlen($bin) < 29) return null;
+    $raw = openssl_decrypt(substr($bin, 28), 'aes-256-gcm', $totpKey, OPENSSL_RAW_DATA, substr($bin, 0, 12), substr($bin, 12, 16));
+    return $raw === false ? null : $raw;
+};
+// A device that has passed the code check once gets a random token. Only its hash is stored.
+$trustHash = fn(mixed $t): ?string => b64_len($t) === 32 ? hash('sha256', (string)base64_decode($t, true)) : null;
+$isTrusted = function (array $user, mixed $token) use ($trustHash): bool {
+    $h = $trustHash($token);
+    if ($h === null) return false;
+    foreach ($user['trusted'] ?? [] as $t) if (hash_equals((string)($t['h'] ?? ''), $h)) return true;
+    return false;
+};
 
 /* ---------- Actions ---------- */
 
@@ -393,10 +460,67 @@ case 'POST login': {
         $auditFail($u, 'login_fail', (bool)$user);
         fail(401, 'bad_credentials');
     }
+    $newTrust = null;
+    if (!empty($user['totp']) && !$isTrusted($user, $body['trust'] ?? null)) {
+        // Right master password on a device that has not passed the code check: ask for the code.
+        if (!isset($body['totp']) || $body['totp'] === '') out(401, ['error' => 'totp_required']);
+        $tk = "totp:$ip|$u";
+        if (throttle_count($tk, 900) >= 5) fail(429, 'slow_down');
+        $key = $totpOpen($user['totp']['secret'] ?? null) ?? fail(500, 'totp_unreadable');
+        $newTrust = base64_encode(random_bytes(32));
+        $step = null;
+        $updateUser($u, function (array $fresh) use ($key, $body, &$step, $newTrust, $trustHash) {
+            $step = totp_match($key, $body['totp'], (int)($fresh['totp']['last'] ?? 0));
+            if ($step === null) return $fresh;
+            $fresh['totp']['last'] = $step;
+            $ua = substr((string)preg_replace('/[^\x20-\x7E]/', '', (string)($_SERVER['HTTP_USER_AGENT'] ?? '')), 0, 200);
+            $fresh['trusted'] = array_slice(array_merge($fresh['trusted'] ?? [], [['h' => $trustHash($newTrust), 'at' => time(), 'ua' => $ua]]), -10);
+            return $fresh;
+        });
+        if ($step === null) {
+            throttle_hit($tk, 900);
+            $audit($u, 'totp_fail');
+            $audit('_server', 'totp_fail', $u);
+            out(401, ['error' => 'bad_totp']);
+        }
+        throttle_clear($tk);
+        $audit($u, 'device_trusted');
+    }
     sign_in($u, (int)($user['gen'] ?? 0));
     $audit($u, 'login_ok');
     $v = read_json($vaultFile($u));
-    out(200, ['rev' => (int)($v['rev'] ?? 0), 'wrap' => $user['wrap'] ?? null, 'recovery' => !empty($user['rec'])]);
+    $res = ['rev' => (int)($v['rev'] ?? 0), 'wrap' => $user['wrap'] ?? null, 'recovery' => !empty($user['rec']), 'totp' => !empty($user['totp'])];
+    if ($newTrust !== null) $res['trust'] = $newTrust;
+    out(200, $res);
+}
+
+case 'POST totp_enable': {
+    // Turn on two-factor sign-in. Needs the current sign-in key and a valid code from the new authenticator entry.
+    $u = require_user();
+    $user = read_json($userFile($u)) ?? fail(404, 'no_account');
+    if (!$verify('login', $u, $body['auth'] ?? null, $user['auth_hash'] ?? null)) fail(401, 'bad_credentials');
+    $key = b32_decode((string)($body['secret'] ?? ''));
+    if ($key === null || strlen($key) < 20 || strlen($key) > 64) fail(400, 'bad_secret');
+    $step = totp_match($key, $body['code'] ?? null, 0);
+    if ($step === null) fail(400, 'bad_totp');
+    $trust = base64_encode(random_bytes(32));
+    $updateUser($u, function (array $fresh) use ($key, $step, $trust, $totpSeal, $trustHash) {
+        $fresh['totp'] = ['secret' => $totpSeal($key), 'last' => $step, 'at' => time()];
+        $ua = substr((string)preg_replace('/[^\x20-\x7E]/', '', (string)($_SERVER['HTTP_USER_AGENT'] ?? '')), 0, 200);
+        $fresh['trusted'] = [['h' => $trustHash($trust), 'at' => time(), 'ua' => $ua]]; // only this device starts out trusted
+        return $fresh;
+    });
+    $audit($u, 'totp_on');
+    out(200, ['totp' => true, 'trust' => $trust]);
+}
+
+case 'POST totp_disable': {
+    $u = require_user();
+    $user = read_json($userFile($u)) ?? fail(404, 'no_account');
+    if (!$verify('login', $u, $body['auth'] ?? null, $user['auth_hash'] ?? null)) fail(401, 'bad_credentials');
+    $updateUser($u, function (array $fresh) { unset($fresh['totp'], $fresh['trusted']); return $fresh; });
+    $audit($u, 'totp_off');
+    out(200, ['totp' => false]);
 }
 
 case 'POST logout': {
@@ -410,7 +534,7 @@ case 'POST logout': {
 case 'GET account': {
     $u = require_user();
     $user = read_json($userFile($u)) ?? fail(404, 'no_account');
-    out(200, ['wrap' => $user['wrap'] ?? null, 'recovery' => !empty($user['rec'])]);
+    out(200, ['wrap' => $user['wrap'] ?? null, 'recovery' => !empty($user['rec']), 'totp' => !empty($user['totp'])]);
 }
 
 case 'POST setwrap': {
@@ -434,12 +558,17 @@ case 'POST rekey': {
     if (b64_len($body['salt'] ?? null) !== 16) fail(400, 'bad_salt');
     if (b64_len($body['newAuth'] ?? null) !== 32) fail(400, 'bad_auth');
     if (!valid_wrap($body['wrap'] ?? null)) fail(400, 'bad_wrap');
-    $user = $updateUser($u, function (array $user) use ($body, $kdf) {
+    $user = $updateUser($u, function (array $user) use ($body, $kdf, $trustHash) {
         $user['salt'] = $body['salt'];
         $user['kdf'] = $kdf;
         $user['auth_hash'] = password_hash($body['newAuth'], PASSWORD_DEFAULT);
         $user['wrap'] = $body['wrap'];
         $user['gen'] = (int)($user['gen'] ?? 0) + 1;
+        // Only the device making the change stays trusted for two-factor sign-in.
+        if (isset($user['trusted'])) {
+            $mine = $trustHash($body['trust'] ?? null);
+            $user['trusted'] = array_values(array_filter($user['trusted'], fn($t) => $mine !== null && hash_equals((string)($t['h'] ?? ''), $mine)));
+        }
         return $user;
     });
     $clearPins($u); // PINs on every device stop working until set again
@@ -495,17 +624,21 @@ case 'POST recover_finish': {
     if (b64_len($body['salt'] ?? null) !== 16) fail(400, 'bad_salt');
     if (b64_len($body['newAuth'] ?? null) !== 32) fail(400, 'bad_auth');
     if (!valid_wrap($body['wrap'] ?? null)) fail(400, 'bad_wrap');
-    $user = $updateUser($u, function (array $user) use ($body, $kdf) {
+    $hadTotp = false;
+    $user = $updateUser($u, function (array $user) use ($body, $kdf, &$hadTotp) {
         $user['salt'] = $body['salt'];
         $user['kdf'] = $kdf;
         $user['auth_hash'] = password_hash($body['newAuth'], PASSWORD_DEFAULT);
         $user['wrap'] = $body['wrap'];
         $user['gen'] = (int)($user['gen'] ?? 0) + 1;
+        $hadTotp = !empty($user['totp']);
+        unset($user['totp'], $user['trusted']); // the recovery key is also the way back in after losing the authenticator
         return $user;
     });
     $clearPins($u);
     sign_in($u, $user['gen']);
     $audit($u, 'recover_ok');
+    if ($hadTotp) $audit($u, 'totp_off');
     $v = read_json($vaultFile($u));
     out(200, ['rev' => (int)($v['rev'] ?? 0)]);
 }
@@ -598,7 +731,7 @@ case 'POST note': {
     // Events that happen only on the device (Face ID) are reported here so they appear in the log.
     $u = require_user();
     $e = (string)($body['e'] ?? '');
-    if (!in_array($e, ['bio_ok', 'bio_on', 'bio_off'], true)) fail(400, 'bad_event');
+    if (!in_array($e, ['bio_ok', 'bio_on', 'bio_off', 'rollback_seen'], true)) fail(400, 'bad_event');
     $audit($u, $e);
     out(200, ['ok' => true]);
 }
@@ -606,7 +739,10 @@ case 'POST note': {
 case 'GET vault': {
     $u = require_user();
     $v = read_json($vaultFile($u)) ?? fail(404, 'no_vault');
-    if (isset($_GET['rev']) && (int)$_GET['rev'] === (int)$v['rev']) out(200, ['rev' => (int)$v['rev'], 'unchanged' => true]);
+    $same = isset($_GET['rev']) && (int)$_GET['rev'] === (int)$v['rev'];
+    // The device may also send a fingerprint of the copy it holds. A different copy under the same version number is sent back in full.
+    if ($same && isset($_GET['h']) && !hash_equals(hash('sha256', (string)$v['blob']), (string)$_GET['h'])) $same = false;
+    if ($same) out(200, ['rev' => (int)$v['rev'], 'unchanged' => true]);
     out(200, ['rev' => (int)$v['rev'], 'blob' => $v['blob']]);
 }
 
@@ -621,8 +757,11 @@ case 'POST save': {
         if ((int)$v['rev'] !== $body['baseRev']) out(409, ['error' => 'conflict', 'rev' => (int)$v['rev'], 'blob' => $v['blob']]);
         if ($v['blob'] !== null) @copy($file, $file . '.prev'); // keep one previous version
         $rev = (int)$v['rev'] + 1;
+        // After a rollback, a device restores its newer copy and lifts the version past the one it had seen.
+        $restore = is_int($body['restoreRev'] ?? null) && $body['restoreRev'] >= $rev && $body['restoreRev'] < $rev + 1000000;
+        if ($restore) $rev = $body['restoreRev'] + 1;
         write_json($file, ['rev' => $rev, 'blob' => $body['blob'], 'updated' => time()]);
-        $audit($u, 'save');
+        $audit($u, $restore ? 'restore' : 'save');
         out(200, ['rev' => $rev]);
     });
 }

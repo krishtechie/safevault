@@ -7,7 +7,7 @@ const API = 'api/index.php';
 
 // Everything sensitive lives only in this object, in memory, while unlocked.
 // encKey is the vault key (non-extractable). wrap is that key locked with the master password key.
-const S = { username: null, encKey: null, auth: null, salt: null, kdf: null, wrap: null, hasRecovery: false, items: [], rev: 0, dirty: false, changes: 0 };
+const S = { username: null, encKey: null, auth: null, salt: null, kdf: null, wrap: null, hasRecovery: false, totp: false, hash: '', rollback: null, items: [], rev: 0, dirty: false, changes: 0 };
 
 /* ---------- Small helpers ---------- */
 
@@ -97,6 +97,10 @@ const ERRORS = {
   csv_none: 'Choose a CSV file first.',
   bio_unsupported: 'This browser or device does not support Face ID or Touch ID unlock for web apps.',
   bio_failed: 'Face ID or Touch ID did not complete. Try again, or use your master password.',
+  totp_required: 'Enter the 6-digit code from your authenticator app.',
+  bad_totp: 'That code is not right, or it was already used. Wait for the next code and try again.',
+  bad_secret: 'Could not set up the authenticator. Start the setup again.',
+  totp_lost: 'This device needs your authenticator code again. Unlock with your master password.',
   need_title: 'Give this entry a name.',
   bad_title: 'The name is too long or contains hidden characters. Retype it.',
   bad_username_field: 'A username or email cannot contain spaces, double quotes, angle brackets or hidden characters.',
@@ -144,6 +148,8 @@ function setAuthMode(m) {
   $('authForgot').hidden = m !== 'unlock';
   $('authMsg').textContent = '';
   $('aPin').value = '';
+  $('totpField').hidden = true;
+  $('aTotp').value = '';
   const focus = { pin: 'aPin', unlock: $('aUser').value ? 'aPass' : 'aUser' }[m];
   if (focus && !$('auth').hidden) $(focus).focus();
 }
@@ -151,7 +157,8 @@ function setAuthMode(m) {
 const restingMode = () => (quickFor($('aUser').value.trim().toLowerCase())?.pin ? 'pin' : 'unlock');
 
 const cacheRecord = (blob) => ({
-  username: S.username, salt: S.salt, kdf: S.kdf, wrap: S.wrap, recovery: S.hasRecovery, blob, rev: S.rev, dirty: S.dirty,
+  username: S.username, salt: S.salt, kdf: S.kdf, wrap: S.wrap, recovery: S.hasRecovery, totp: S.totp, hash: S.hash,
+  blob, rev: S.rev, dirty: S.dirty,
 });
 async function cacheState(blob) { await store.set('state', cacheRecord(blob)); }
 // Update account fields in the device copy without touching the encrypted vault stored there.
@@ -168,12 +175,29 @@ const checkStrength = (pw, pw2) => {
 
 // Signs in to the server and returns the raw vault key. Accounts created before key
 // wrapping existed are upgraded here: their existing key is wrapped and stored, and the vault is left as is.
+// A device that has passed the authenticator check holds a random token, so it is not asked again.
+let trust = null; // { username, token }
+const loginBody = (username, auth, code = '') => {
+  const body = { username, auth };
+  if (trust && trust.username === username) body.trust = trust.token;
+  if (code) body.totp = code;
+  return body;
+};
+async function keepTrust(username, token) {
+  if (!token) return;
+  trust = { username, token };
+  await store.set('trust', trust).catch(() => {});
+}
+// Signs in again with what is in memory (session expired). Never has a code to offer.
+const relogin = () => api('login', loginBody(S.username, S.auth));
+
 async function signIn(username, keys) {
-  const r = await api('login', { username, auth: keys.auth });
+  const r = await api('login', loginBody(username, keys.auth, $('totpField').hidden ? '' : $('aTotp').value.replace(/\D/g, '')));
+  await keepTrust(username, r.trust);
   const vkRaw = r.wrap ? await core.unwrapKey(keys.kek, username, r.wrap) : keys.legacyRaw;
   // If the upgrade call fails (for example mid-deploy), carry on; it is retried at the next unlock.
   const wrap = r.wrap || await api('setwrap', { wrap: await core.wrapKey(keys.kek, username, vkRaw) }).then((x) => x.wrap, () => null);
-  return { vkRaw, wrap, rev: r.rev, recovery: !!r.recovery };
+  return { vkRaw, wrap, rev: r.rev, recovery: !!r.recovery, totp: !!r.totp };
 }
 
 // Changes made on this device that never reached the server survive a password change,
@@ -197,14 +221,19 @@ async function unlock(username, password) {
     if (local) {
       let wrap = cached.wrap || null;
       let recovery = !!cached.recovery;
+      let totp = !!cached.totp;
       try {
         const r = await signIn(username, keys);
         wrap = r.wrap;
         recovery = r.recovery;
+        totp = r.totp;
       } catch (e) {
         if (e.message === 'bad_credentials') throw new Error('changed_elsewhere');
+        if (e.message === 'totp_required' || e.message === 'bad_totp') throw e; // the server wants the authenticator code
         // offline or busy: carry on with the device copy
       }
+      S.totp = totp;
+      S.hash = cached.hash || '';
       Object.assign(S, {
         username, encKey: local.vk, auth: keys.auth, salt: cached.salt, kdf: cached.kdf, wrap, hasRecovery: recovery,
         items: local.items, rev: cached.rev, dirty: !!cached.dirty,
@@ -227,6 +256,8 @@ async function unlock(username, password) {
     username, encKey: vk, auth: keys.auth, salt: pre.salt, kdf: core.checkKdf(pre.kdf), wrap: r.wrap, hasRecovery: r.recovery,
     items: core.mergeItems(extra, remote), rev: v.rev, dirty: extra.length > 0,
   });
+  S.totp = r.totp;
+  S.hash = await core.sha256Hex(v.blob);
   await cacheState(extra.length ? await core.encryptVault(vk, username, S.items) : v.blob);
 }
 
@@ -239,7 +270,8 @@ async function register(username, password, invite) {
   const vk = await core.importVaultKey(vkRaw);
   const blob = await core.encryptVault(vk, username, []);
   const r = await api('register', { username, salt, kdf, auth: keys.auth, wrap, invite, blob });
-  Object.assign(S, { username, encKey: vk, auth: keys.auth, salt, kdf, wrap, hasRecovery: false, items: [], rev: r.rev, dirty: false });
+  Object.assign(S, { username, encKey: vk, auth: keys.auth, salt, kdf, wrap, hasRecovery: false, totp: false, items: [], rev: r.rev, dirty: false });
+  S.hash = await core.sha256Hex(blob);
   await cacheState(blob);
 }
 
@@ -262,9 +294,12 @@ async function recover(username, code, password) {
   const remote = await core.decryptVault(vk, username, v.blob);
   const extra = await unsyncedLocal(await store.get('state'), username, vk);
   Object.assign(S, {
-    username, encKey: vk, auth: keys.auth, salt, kdf, wrap, hasRecovery: true,
+    username, encKey: vk, auth: keys.auth, salt, kdf, wrap, hasRecovery: true, totp: false,
     items: core.mergeItems(extra, remote), rev: v.rev, dirty: extra.length > 0,
   });
+  S.hash = await core.sha256Hex(v.blob);
+  trust = null; // recovery turned two-factor sign-in off on the server
+  await store.del('trust').catch(() => {});
   await cacheState(extra.length ? await core.encryptVault(vk, username, S.items) : v.blob);
 }
 
@@ -286,7 +321,7 @@ async function openWithVaultKey(q, vkRaw) {
   const auth = await core.openText(vk, q.auth);
   Object.assign(S, {
     username: q.username, encKey: vk, auth, salt: cached.salt, kdf: cached.kdf, wrap: cached.wrap || null,
-    hasRecovery: !!cached.recovery, items, rev: cached.rev, dirty: !!cached.dirty,
+    hasRecovery: !!cached.recovery, totp: !!cached.totp, hash: cached.hash || '', items, rev: cached.rev, dirty: !!cached.dirty,
   });
   sealedAuth = q.auth;
 }
@@ -389,12 +424,18 @@ $('authForm').addEventListener('submit', async (ev) => {
     else if (started === 'register') await register(username, password, $('aInvite').value);
     else if (started === 'recover') await recover(username, $('aRec').value, password);
     else await unlock(username, password);
-    for (const id of ['aPass', 'aPass2', 'aInvite', 'aRec', 'aPin']) $(id).value = '';
+    for (const id of ['aPass', 'aPass2', 'aInvite', 'aRec', 'aPin', 'aTotp']) $(id).value = '';
+    $('totpField').hidden = true;
     enterApp();
     if (started === 'recover') toast('New master password set');
   } catch (e) {
     $('aPin').value = '';
     if (started === 'pin' && ['pin_locked', 'pin_gone', 'need_master'].includes(e.message)) setAuthMode('unlock');
+    if (e.message === 'totp_required' || e.message === 'bad_totp') { // right master password, new device: second step
+      $('totpField').hidden = false;
+      $('aTotp').value = '';
+      $('aTotp').focus();
+    }
     msg.textContent = explain(e);
   } finally {
     btn.disabled = false;
@@ -433,11 +474,20 @@ function lock(message = '') {
   if (!S.encKey) return;
   const user = S.username;
   Object.assign(S, { username: null, encKey: null, auth: null, salt: null, kdf: null, wrap: null, hasRecovery: false, items: [], rev: 0, dirty: false });
+  S.totp = false;
+  S.hash = '';
+  S.rollback = null;
+  $('rollbackBar').hidden = true;
   sealedAuth = null;
+  // Cleared synchronously, so a reload right after Lock can never reopen the vault
+  // even if the stored key has not finished being removed yet.
+  try { sessionStorage.removeItem('vaultOpen'); } catch { /* storage blocked */ }
   store.del('unlock').catch(() => {});
   if ($('itemDlg').open) $('itemDlg').close();
-  for (const id of ['fTitle', 'fUser', 'fPass', 'fUrl', 'fNotes', 'search', 'importPass', 'cpCur', 'cpNew', 'cpNew2', 'recPass', 'qPass', 'qPin', 'qPin2']) $(id).value = '';
-  for (const id of ['healthMsg', 'cpMsg', 'recMsg', 'recCode', 'pinMsg', 'bioMsg', 'csvMsg']) $(id).textContent = '';
+  for (const id of ['fTitle', 'fUser', 'fPass', 'fUrl', 'fNotes', 'search', 'importPass', 'cpCur', 'cpNew', 'cpNew2', 'recPass', 'qPass', 'qPin', 'qPin2', 'tfaPass', 'tfaCode']) $(id).value = '';
+  $('tfaSetup').hidden = true;
+  tfaPending = null;
+  for (const id of ['healthMsg', 'cpMsg', 'recMsg', 'recCode', 'pinMsg', 'bioMsg', 'csvMsg', 'tfaMsg', 'tfaKey']) $(id).textContent = '';
   $('csvFile').value = '';
   $('recOut').hidden = true;
   $('list').replaceChildren();
@@ -499,7 +549,7 @@ async function tryRestore() {
     const auth = await core.openText(u.key, u.auth);
     Object.assign(S, {
       username: u.username, encKey: u.key, auth, salt: cached.salt, kdf: cached.kdf, wrap: cached.wrap || null,
-      hasRecovery: !!cached.recovery, items, rev: cached.rev, dirty: !!cached.dirty,
+      hasRecovery: !!cached.recovery, totp: !!cached.totp, hash: cached.hash || '', items, rev: cached.rev, dirty: !!cached.dirty,
     });
     sealedAuth = u.auth;
     enterApp(u.lastActive); // a reload does not count as activity
@@ -545,38 +595,65 @@ async function mergeRemote(blob, rev) {
   const remote = await core.decryptVault(S.encKey, S.username, blob);
   S.items = core.mergeItems(S.items, remote);
   S.rev = rev;
+  S.hash = await core.sha256Hex(blob);
   if (!S.dirty) await cacheState(blob);
   renderList();
 }
 
+// The server offered a copy older than (or different from) what this device has already seen.
+// Nothing is merged or overwritten until the user decides.
+function raiseRollback(kind, serverRev, blob) {
+  const first = !S.rollback;
+  S.rollback = { kind, serverRev, blob };
+  $('rollbackText').textContent = {
+    older: `The server returned an older copy of your vault (version ${serverRev}; this device has seen version ${S.rev}). `,
+    swapped: `The server returned a different vault under the same version number (${serverRev}). `,
+    missing: 'Your vault is missing from the server. ',
+  }[kind] + 'This happens when a server is restored from a backup, and it can also mean someone tampered with it. Your passwords on this device are untouched and nothing was overwritten.';
+  $('rollbackBar').hidden = false;
+  setStatus('error');
+  if (first) authed(() => api('note', { e: 'rollback_seen' })).catch(() => {});
+}
+
 async function doSync() {
+  if (S.rollback) { setStatus('error'); return; } // paused until the user restores
   setStatus('syncing');
   try {
     for (let attempt = 0; attempt < 6 && S.encKey; attempt++) {
       let remote;
       try {
-        remote = await api('vault', null, '&rev=' + S.rev);
+        remote = await api('vault', null, '&rev=' + S.rev + (S.hash ? '&h=' + S.hash : ''));
       } catch (e) {
+        if (e.message === 'no_vault' && S.rev > 0) { raiseRollback('missing', 0, null); return; }
         if (e.status !== 401) throw e;
         try {
-          await api('login', { username: S.username, auth: S.auth }); // session expired, sign in again
+          await relogin(); // session expired, sign in again
         } catch (e2) {
-          if (e2.message !== 'bad_credentials') throw e2;
-          quick = null; // quick unlock on this device holds the old sign-in key
+          if (e2.message !== 'bad_credentials' && e2.message !== 'totp_required') throw e2;
+          quick = null; // quick unlock on this device holds a sign-in that no longer works
           await store.del('quick').catch(() => {});
-          lock(ERRORS.changed_elsewhere); // the sign-in key no longer works
+          lock(e2.message === 'totp_required' ? ERRORS.totp_lost : ERRORS.changed_elsewhere);
           return;
         }
         continue;
       }
-      if (!remote.unchanged) await mergeRemote(remote.blob, remote.rev);
+      if (!remote.unchanged) {
+        const verdict = core.checkRollback(S.rev, S.hash, remote.rev, await core.sha256Hex(remote.blob));
+        if (verdict) { raiseRollback(verdict, remote.rev, remote.blob); return; }
+        await mergeRemote(remote.blob, remote.rev);
+      }
       if (!S.dirty) break;
 
       const mark = S.changes;
       const blob = await core.encryptVault(S.encKey, S.username, S.items);
       const saved = await api('save', { blob, baseRev: S.rev });
-      if (saved.status === 409) { await mergeRemote(saved.blob, saved.rev); continue; } // another device saved first
+      if (saved.status === 409) { // another device saved first, or the server went backwards
+        if (saved.rev < S.rev) { raiseRollback('older', saved.rev, saved.blob); return; }
+        await mergeRemote(saved.blob, saved.rev);
+        continue;
+      }
       S.rev = saved.rev;
+      S.hash = await core.sha256Hex(blob);
       if (S.changes === mark) S.dirty = false;
       await cacheState(blob);
       if (!S.dirty) break;
@@ -586,6 +663,38 @@ async function doSync() {
     if (S.encKey) setStatus(e.offline ? 'offline' : 'error');
   }
 }
+
+// Puts this device's newer copy back on the server, keeping anything the server copy has that this device lacks.
+$('rollbackFix').addEventListener('click', async () => {
+  const rb = S.rollback;
+  if (!rb) return;
+  const btn = $('rollbackFix');
+  btn.disabled = true;
+  try {
+    let items = S.items;
+    if (rb.blob) {
+      try { items = core.mergeItems(S.items, await core.decryptVault(S.encKey, S.username, rb.blob)); } catch { /* unreadable copy: keep ours */ }
+    }
+    const blob = await core.encryptVault(S.encKey, S.username, items);
+    const r = await authed(() => api('save', { blob, baseRev: rb.serverRev, restoreRev: S.rev }));
+    S.rollback = null;
+    $('rollbackBar').hidden = true;
+    if (r.status !== 409) {
+      S.items = items;
+      S.rev = r.rev;
+      S.hash = await core.sha256Hex(blob);
+      S.dirty = false;
+      await cacheState(blob);
+      renderList();
+      toast('Vault restored to the server from this device');
+    }
+    sync(); // on a conflict the server moved again: look afresh
+  } catch (e) {
+    toast(e.offline ? 'Restoring needs internet' : 'Could not restore. Try again');
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 // Called after every local change: encrypt, save on this device, then push.
 async function persist() {
@@ -889,6 +998,11 @@ function renderAccount() {
     ? 'A recovery key is set for this account. Creating a new one replaces it.'
     : 'No recovery key yet. Without one, a forgotten master password cannot be reset by anyone.';
   $('recBtn').textContent = S.hasRecovery ? 'Replace recovery key' : 'Create recovery key';
+  $('tfaStatus').textContent = S.totp
+    ? 'Two-factor sign-in is on. A new device needs your master password and a code from your authenticator app.'
+    : 'Off. Anyone who learns your master password could sign in from their own device.';
+  $('tfaBegin').hidden = S.totp;
+  $('tfaOff').hidden = !S.totp;
   const q = quickFor(S.username);
   $('pinBtn').textContent = q && q.pin ? 'Change PIN' : 'Set PIN';
   $('pinOff').hidden = !(q && q.pin);
@@ -903,7 +1017,7 @@ async function authed(fn) {
   try { return await fn(); }
   catch (e) {
     if (e.message !== 'signed_out') throw e;
-    await api('login', { username: S.username, auth: S.auth });
+    await relogin();
     return fn();
   }
 }
@@ -948,7 +1062,7 @@ $('cpBtn').addEventListener('click', () => withButton($('cpBtn'), $('cpMsg'), as
   const kdf = { ...core.KDF_DEFAULT };
   const keys = await core.deriveKeys(next, salt, kdf);
   const wrap = await core.wrapKey(keys.kek, S.username, vkRaw);
-  await authed(() => api('rekey', { auth: cur.auth, newAuth: keys.auth, salt, kdf, wrap }));
+  await authed(() => api('rekey', { auth: cur.auth, newAuth: keys.auth, salt, kdf, wrap, trust: trust && trust.username === S.username ? trust.token : undefined }));
   Object.assign(S, { auth: keys.auth, salt, kdf, wrap });
   sealedAuth = await core.sealText(S.encKey, S.auth);
   await patchCache();
@@ -1053,6 +1167,76 @@ $('bioOff').addEventListener('click', () => withButton($('bioOff'), $('bioMsg'),
   if (q) { delete q.bio; await saveQuick(); authed(() => api('note', { e: 'bio_off' })).catch(() => {}); }
   return bioName + ' unlock is off for this device. You can also delete the "Vault" passkey in your device password settings.';
 }));
+
+/* ---------- Two-factor sign-in ---------- */
+
+let tfaPending = null; // { auth, secret } between "Set up" and "Turn on"
+
+function drawQr(target, text) {
+  const qr = globalThis.qrcode(0, 'M');
+  qr.addData(text);
+  qr.make();
+  const n = qr.getModuleCount();
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('viewBox', `0 0 ${n + 8} ${n + 8}`);
+  svg.setAttribute('role', 'img');
+  svg.setAttribute('aria-label', 'QR code for your authenticator app');
+  const bg = document.createElementNS(NS, 'rect');
+  bg.setAttribute('width', n + 8);
+  bg.setAttribute('height', n + 8);
+  bg.setAttribute('fill', '#fff');
+  svg.append(bg);
+  let d = '';
+  for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) if (qr.isDark(r, c)) d += `M${c + 4} ${r + 4}h1v1h-1z`;
+  const path = document.createElementNS(NS, 'path');
+  path.setAttribute('d', d);
+  path.setAttribute('fill', '#000');
+  svg.append(path);
+  target.replaceChildren(svg);
+}
+
+$('tfaBegin').addEventListener('click', () => withButton($('tfaBegin'), $('tfaMsg'), async () => {
+  const { keys } = await confirmMaster($('tfaPass').value);
+  const secret = core.newTotpSecret();
+  tfaPending = { auth: keys.auth, secret };
+  const uri = core.otpauthUri(secret, S.username);
+  drawQr($('tfaQr'), uri);
+  $('tfaKey').textContent = secret.match(/.{4}/g).join(' ');
+  $('tfaLink').href = uri;
+  $('tfaSetup').hidden = false;
+  $('tfaPass').value = '';
+  $('tfaCode').focus();
+  return 'Add the key to your authenticator app, then enter the code it shows.';
+}));
+
+$('tfaOn').addEventListener('click', () => withButton($('tfaOn'), $('tfaMsg'), async () => {
+  if (!tfaPending) throw new Error('bad_secret');
+  const code = $('tfaCode').value.replace(/\D/g, '');
+  if (code.length !== 6) throw new Error('bad_totp');
+  const r = await authed(() => api('totp_enable', { auth: tfaPending.auth, secret: tfaPending.secret, code }));
+  await keepTrust(S.username, r.trust);
+  S.totp = true;
+  tfaPending = null;
+  await patchCache();
+  $('tfaSetup').hidden = true;
+  $('tfaCode').value = '';
+  $('tfaKey').textContent = '';
+  $('tfaQr').replaceChildren();
+  return 'Two-factor sign-in is on. This device stays signed in; any other device will need a code once.';
+}));
+
+$('tfaOff').addEventListener('click', () => withButton($('tfaOff'), $('tfaMsg'), async () => {
+  const { keys } = await confirmMaster($('tfaPass').value);
+  await authed(() => api('totp_disable', { auth: keys.auth }));
+  S.totp = false;
+  trust = null;
+  await store.del('trust').catch(() => {});
+  await patchCache();
+  $('tfaPass').value = '';
+  return 'Two-factor sign-in is off.';
+}));
+$('tfaCopy').addEventListener('click', () => copy($('tfaKey').textContent.replace(/\s/g, ''), 'Key copied'));
 
 /* ---------- Import from CSV ---------- */
 
@@ -1192,7 +1376,9 @@ $('signOutBtn').addEventListener('click', async () => {
   if (quick && quick.pin) await api('pin_clear', { deviceId: quick.pin.deviceId }).catch(() => {});
   try { await api('logout', {}); } catch { /* offline is fine */ }
   quick = null;
+  trust = null;
   await store.del('quick').catch(() => {});
+  await store.del('trust').catch(() => {});
   await store.del('state');
   lock();
   $('aUser').value = '';
@@ -1203,6 +1389,7 @@ $('signOutBtn').addEventListener('click', async () => {
 setAuthMode('unlock');
 (async () => {
   quick = await store.get('quick').catch(() => null) || null;
+  trust = await store.get('trust').catch(() => null) || null;
   if (await tryRestore().catch(() => false)) return;
   const c = await store.get('state').catch(() => null);
   if (c?.username) $('aUser').value = c.username;

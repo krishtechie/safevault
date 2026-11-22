@@ -17,6 +17,8 @@ Runs on ordinary shared hosting (PHP 8.1+, no database). The front end is plain 
 | Face ID / Touch ID | Optional, per device. Uses a passkey with the WebAuthn PRF extension: the device's secure hardware releases a secret only after a successful face or fingerprint check. Works offline |
 | Access log | The server records each sign-in, failed attempt and security change with time, address and browser (latest 500 per account). Settings shows it in plain words with filters by type, period and search. It never contains keys or passwords. The server owner (the first account, or `owner` in config) also sees failed attempts on usernames that do not exist and on other accounts, with the name that was tried. A city and country are shown for each address through a lookup service, which can be switched off with `geo_url` in config |
 | Import | CSV exports from Google or Chrome, Safari, Firefox, Edge, Bitwarden, 1Password and LastPass are read on the device, cleaned by the same field rules, de-duplicated against the vault, and encrypted before anything is sent |
+| Two-factor sign-in | Optional. A new device needs the master password and a 6-digit authenticator code (TOTP, RFC 6238). Codes cannot be reused, five wrong codes block further tries, and the secret is stored encrypted on the server. Devices that passed once hold a random token and are not asked again. The recovery key is the way back in if the authenticator is lost |
+| Rollback detection | Each device remembers the vault version and a fingerprint of the copy it last saw. If the server offers an older copy, a different copy under the same version, or no vault at all, syncing pauses with a warning and the device can restore its copy |
 | Stay unlocked | Optional. The vault key is held as a non-extractable browser key until the auto-lock time passes, so a page reload does not ask for the password again. Closing and reopening the app always asks to unlock, with Face ID offered at once when it is on |
 | Server knowledge | Only a bcrypt hash of the sign-in key and the encrypted vault blob. A full server breach exposes no passwords |
 | Sync | Revision numbers with conflict detection. Devices merge per entry (newest edit wins, deletions sync) |
@@ -54,7 +56,8 @@ Covers key derivation (cross-checked against libsodium), encryption round trips 
 
 - This project has not had an independent security audit. Keep an encrypted backup (Settings) and a second copy of critical passwords until you trust it.
 - A forgotten master password can only be replaced with the recovery key. With neither, the vault cannot be opened by anyone.
-- Not in this version: two-factor sign-in, browser autofill.
+- Not in this version: browser autofill.
+- Rollback detection needs a device that has seen the newer copy. A brand new device has nothing to compare against.
 - PIN unlock protects against someone who has the device but not the PIN. Someone holding both the device's storage and the server's files could try all PINs, so the master password remains the real key.
 - Passwords are in memory while the vault is unlocked, so a compromised device or malicious browser extension can still read them. That is true of every password manager.
 

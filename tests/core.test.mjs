@@ -297,3 +297,22 @@ test('CSV import: skips, duplicates, cleaning and bad files', () => {
   assert.throws(() => core.importCsv('a,b\n1,2\n'), { message: 'csv_no_password_column' });
   assert.throws(() => core.importCsv('password\n' + 'x\n'.repeat(5001)), { message: 'csv_too_big' });
 });
+
+test('rollback detection: older and swapped copies are flagged, normal updates are not', async () => {
+  assert.equal(core.checkRollback(7, 'aa', 8, 'bb'), null);   // newer copy from another device
+  assert.equal(core.checkRollback(7, 'aa', 7, 'aa'), null);   // nothing changed
+  assert.equal(core.checkRollback(7, 'aa', 6, 'cc'), 'older');
+  assert.equal(core.checkRollback(7, 'aa', 0, ''), 'older');
+  assert.equal(core.checkRollback(7, 'aa', 7, 'zz'), 'swapped');
+  assert.equal(core.checkRollback(7, '', 7, 'zz'), null);     // a device upgraded from an older release has no fingerprint yet
+  assert.equal(core.checkRollback(0, '', 1, 'aa'), null);     // a brand new device has nothing to compare
+  assert.equal(await core.sha256Hex('abc'), 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
+});
+
+test('two-factor setup: secret format and authenticator link', () => {
+  const a = core.newTotpSecret();
+  assert.match(a, /^[A-Z2-7]{32}$/);
+  assert.notEqual(a, core.newTotpSecret());
+  assert.equal(core.otpauthUri('JBSWY3DPEHPK3PXP', 'me@x'), 'otpauth://totp/Vault:me%40x?secret=JBSWY3DPEHPK3PXP&issuer=Vault&algorithm=SHA1&digits=6&period=30');
+  for (const k of ['totp_on', 'totp_off', 'totp_fail', 'device_trusted', 'restore', 'rollback_seen']) assert.ok(core.LOG_EVENTS[k]);
+});
