@@ -236,29 +236,33 @@ $isOwner = function (string $u) use ($cfg, $dataDir): bool {
 // City and country for an address, looked up only when the log is viewed and cached for 30 days.
 // Set 'geo_url' => false in config.php to switch this off (addresses are then never sent anywhere).
 $geo = function (array $ips) use ($cfg, $dataDir): array {
-    $tpl = array_key_exists('geo_url', $cfg) ? $cfg['geo_url'] : 'https://free.freeipapi.com/api/json/{ip}';
+    $tpl = array_key_exists('geo_url', $cfg) ? $cfg['geo_url'] : 'https://free.freeipapi.com/api/v1/json/{ip}';
     $out = [];
+    $tried = 0;
+    $found = 0;
     $deadline = microtime(true) + 6;
     $fetched = 0;
     foreach (array_unique($ips) as $addr) {
         if (!filter_var($addr, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) continue;
         $file = $dataDir . '/geo/' . hash('sha256', $addr) . '.json';
         $hit = read_json($file);
-        if ($hit && (int)($hit['until'] ?? 0) > time()) {
+        if ($hit && ($hit['v'] ?? 0) === 2 && (int)($hit['until'] ?? 0) > time()) {
             if (($hit['where'] ?? '') !== '') $out[$addr] = $hit['where'];
             continue;
         }
-        if (!is_string($tpl) || $tpl === '' || $fetched >= 12 || microtime(true) > $deadline) continue;
+        // The free service allows 10 lookups per 10 seconds, so a single view asks for at most 8 new ones.
+        if (!is_string($tpl) || $tpl === '' || $fetched >= 8 || microtime(true) > $deadline) continue;
         $fetched++;
         $url = str_replace('{ip}', rawurlencode($addr), $tpl);
         $raw = false;
         if (function_exists('curl_init')) {
             $ch = curl_init($url);
             curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 2, CURLOPT_CONNECTTIMEOUT => 2,
-                CURLOPT_FOLLOWLOCATION => false, CURLOPT_HTTPHEADER => ['Accept: application/json']]);
+                CURLOPT_FOLLOWLOCATION => false, CURLOPT_USERAGENT => 'Vault-access-log/1.0',
+                CURLOPT_HTTPHEADER => ['Accept: application/json']]);
             $raw = curl_exec($ch);
         } elseif (ini_get('allow_url_fopen')) {
-            $raw = @file_get_contents($url, false, stream_context_create(['http' => ['timeout' => 2, 'header' => "Accept: application/json\r\n"]]), 0, 20000);
+            $raw = @file_get_contents($url, false, stream_context_create(['http' => ['timeout' => 2, 'header' => "Accept: application/json\r\nUser-Agent: Vault-access-log/1.0\r\n"]]), 0, 20000);
         }
         $j = is_string($raw) ? json_decode(substr($raw, 0, 20000), true) : null;
         $parts = [];
@@ -275,10 +279,13 @@ $geo = function (array $ips) use ($cfg, $dataDir): array {
         }
         $where = implode(', ', $parts);
         // A failed lookup is retried after an hour, a good one is kept for 30 days.
-        write_json($file, ['where' => $where, 'until' => time() + ($where === '' ? 3600 : 30 * 86400)]);
-        if ($where !== '') $out[$addr] = $where;
+        write_json($file, ['v' => 2, 'where' => $where, 'until' => time() + ($where === '' ? 3600 : 30 * 86400)]);
+        $tried++;
+        if ($where !== '') { $out[$addr] = $where; $found++; }
     }
-    return $out;
+    // 'off' = switched off in config, 'failed' = every new lookup in this view came back empty.
+    $state = (!is_string($tpl) || $tpl === '') ? 'off' : (($tried > 0 && $found === 0) ? 'failed' : 'ok');
+    return ['where' => $out, 'state' => $state];
 };
 
 // Checks a secret against a stored hash with throttling. Unknown users get a dummy hash so timing reveals nothing.
@@ -583,7 +590,8 @@ case 'GET log': {
     foreach ($entries as $i => $row) $entries[$i]['i'] = $i;
     usort($entries, fn($x, $y) => [$y['t'], $y['i']] <=> [$x['t'], $x['i']]);
     $entries = array_map(function ($row) { unset($row['i']); return $row; }, array_slice($entries, 0, 500));
-    out(200, ['entries' => $entries, 'ip' => $ip, 'owner' => $owner, 'where' => (object)$geo(array_column($entries, 'ip'))]);
+    $places = $geo(array_column($entries, 'ip'));
+    out(200, ['entries' => $entries, 'ip' => $ip, 'owner' => $owner, 'where' => (object)$places['where'], 'geo' => $places['state']]);
 }
 
 case 'POST note': {

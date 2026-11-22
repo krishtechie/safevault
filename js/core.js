@@ -442,3 +442,81 @@ export function filterLog(entries, { type = 'all', days = 0, text = '', now = Da
     return !q || [label, en.ip, describeDevice(en.ua), en.ua, en.u || '', en.where || ''].some((v) => String(v).toLowerCase().includes(q));
   });
 }
+
+/* ---------- Import from other password managers (CSV) ---------- */
+
+// Reads CSV text into rows of cells. Handles quoted cells, doubled quotes, commas and line breaks inside quotes.
+export function parseCsv(text) {
+  const src = String(text).replace(/^﻿/, '');
+  const rows = [];
+  let row = [];
+  let cell = '';
+  let quoted = false;
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (quoted) {
+      if (c === '"') {
+        if (src[i + 1] === '"') { cell += '"'; i++; } else quoted = false;
+      } else cell += c;
+    } else if (c === '"' && cell === '') quoted = true;
+    else if (c === ',') { row.push(cell); cell = ''; }
+    else if (c === '\n' || c === '\r') {
+      if (c === '\r' && src[i + 1] === '\n') i++;
+      row.push(cell);
+      cell = '';
+      if (row.some((v) => v !== '')) rows.push(row);
+      row = [];
+    } else cell += c;
+  }
+  row.push(cell);
+  if (row.some((v) => v !== '')) rows.push(row);
+  return rows;
+}
+
+// Column names used by Google/Chrome, Safari and iCloud, Firefox, Edge, Bitwarden, 1Password, LastPass, Dashlane and NordPass.
+const CSV_COLUMNS = {
+  title: ['name', 'title', 'account', 'item name', 'site name'],
+  url: ['url', 'website', 'login_uri', 'web site', 'uri', 'login url', 'site', 'origin'],
+  username: ['username', 'login_username', 'user name', 'login', 'email', 'user', 'login name'],
+  password: ['password', 'login_password', 'pass'],
+  notes: ['note', 'notes', 'extra', 'comment', 'comments'],
+};
+
+// Turns an export file into entries. existing = entries already in the vault, used to skip duplicates.
+// Returns { items, duplicates, skipped: [{ line, reason }] } and throws 'csv_no_password_column' for a file it cannot read.
+export function importCsv(text, existing = []) {
+  const rows = parseCsv(text);
+  if (rows.length < 2) throw new Error('csv_empty');
+  const header = rows[0].map((h) => h.trim().toLowerCase());
+  const col = {};
+  for (const [field, names] of Object.entries(CSV_COLUMNS)) col[field] = header.findIndex((h) => names.includes(h));
+  if (col.password < 0) throw new Error('csv_no_password_column');
+  if (rows.length > 5001) throw new Error('csv_too_big');
+  const keyOf = (it) => [it.url || it.title.toLowerCase(), it.username.toLowerCase(), it.password].join('\u0001');
+  const seen = new Set(existing.filter((it) => !it.deleted).map(keyOf));
+  const items = [];
+  const skipped = [];
+  let duplicates = 0;
+  const now = Date.now();
+  rows.slice(1).forEach((r, n) => {
+    const get = (f) => (col[f] >= 0 ? String(r[col[f]] ?? '') : '');
+    const password = get('password');
+    if (!password.trim()) { skipped.push({ line: n + 2, reason: 'no password' }); return; }
+    if (password.length > LIMITS.password) { skipped.push({ line: n + 2, reason: 'password longer than 256 characters' }); return; }
+    let url = '';
+    try { url = normalizeUrl(get('url')); } catch { /* app links such as android:// have no web address */ }
+    let title = get('title').trim();
+    if (!title && url) title = new URL(url).hostname.replace(/^www\./, '');
+    if (!title) title = get('username').trim() || 'Imported entry';
+    // sanitizeItems applies the same cleaning as every other data source.
+    const [clean] = sanitizeItems([{
+      id: newId(), title, username: get('username'), password, url, notes: get('notes'), createdAt: now, updatedAt: now,
+    }]);
+    if (!clean.password) { skipped.push({ line: n + 2, reason: 'no usable password' }); return; }
+    const key = keyOf(clean);
+    if (seen.has(key)) { duplicates++; return; }
+    seen.add(key);
+    items.push(clean);
+  });
+  return { items, duplicates, skipped };
+}

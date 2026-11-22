@@ -254,3 +254,46 @@ test('access log: readable device names and filters', () => {
   assert.deepEqual(g({ text: '15 minutes' }), ['login_blocked']);
   for (const k of ['login_fail_unknown', 'login_blocked_unknown', 'login_bad_name', 'recover_fail_unknown', 'recover_blocked', 'recover_blocked_unknown', 'register_bad_invite', 'login_blocked']) assert.equal(core.LOG_EVENTS[k][1], 'fail');
 });
+
+test('CSV parser: quotes, commas, line breaks, doubled quotes, BOM, blank lines', () => {
+  const csv = '﻿name,url,note\r\n"Smith, John",https://a.com,"line one\nline two"\r\n\r\nplain,"say ""hi""",\n';
+  assert.deepEqual(core.parseCsv(csv), [['name', 'url', 'note'], ['Smith, John', 'https://a.com', 'line one\nline two'], ['plain', 'say "hi"', '']]);
+  assert.deepEqual(core.parseCsv(''), []);
+  assert.deepEqual(core.parseCsv('a,b'), [['a', 'b']]);
+});
+
+test('CSV import: Google, Safari, Bitwarden, LastPass and Firefox layouts', () => {
+  const pick = (r) => r.items.map((i) => [i.title, i.username, i.password, i.url, i.notes]);
+  const google = 'name,url,username,password,note\nexample.com,https://example.com/login,me@example.com,"p,ass""word",my note\n,https://shop.test/,bob,secret123,\nandroid app,android://abc==@com.app.x/,me,apppass,\n';
+  assert.deepEqual(pick(core.importCsv(google)), [
+    ['example.com', 'me@example.com', 'p,ass"word', 'https://example.com/login', 'my note'],
+    ['shop.test', 'bob', 'secret123', 'https://shop.test/', ''],
+    ['android app', 'me', 'apppass', '', ''],
+  ]);
+  const safari = 'Title,URL,Username,Password,Notes,OTPAuth\nBank (me),https://bank.test/,me,Tr0ub4dor,,\n';
+  assert.deepEqual(pick(core.importCsv(safari)), [['Bank (me)', 'me', 'Tr0ub4dor', 'https://bank.test/', '']]);
+  const bitwarden = 'folder,favorite,type,name,notes,fields,reprompt,login_uri,login_username,login_password,login_totp\n,,login,Mail,hello,,0,https://mail.test,me@x.com,pw1,\n';
+  assert.deepEqual(pick(core.importCsv(bitwarden)), [['Mail', 'me@x.com', 'pw1', 'https://mail.test/', 'hello']]);
+  const lastpass = 'url,username,password,totp,extra,name,grouping,fav\nhttps://lp.test,u,pw2,,note here,LP Site,,0\n';
+  assert.deepEqual(pick(core.importCsv(lastpass)), [['LP Site', 'u', 'pw2', 'https://lp.test/', 'note here']]);
+  const firefox = '"url","username","password","httpRealm","formActionOrigin","guid"\n"https://ff.test","u","pw3",,"https://ff.test","{x}"\n';
+  assert.deepEqual(pick(core.importCsv(firefox)), [['ff.test', 'u', 'pw3', 'https://ff.test/', '']]);
+});
+
+test('CSV import: skips, duplicates, cleaning and bad files', () => {
+  const csv = 'name,url,username,password,note\nA,https://a.test,me,pw-a,\nA,https://a.test,ME,pw-a,\nNoPw,https://b.test,me,,\nBig,https://c.test,me,' + 'x'.repeat(300) + ',\n<img src=x onerror=alert(1)>,javascript:alert(1),me​,pw\u0000d,\nExisting,https://e.test,me,pw-e,\n';
+  const existing = core.sanitizeItems([{ id: 'e1', title: 'Old name', username: 'me', password: 'pw-e', url: 'https://e.test', updatedAt: 1 }, { id: 'e2', deleted: true, updatedAt: 2 }]);
+  const r = core.importCsv(csv, existing);
+  assert.equal(r.items.length, 2);
+  assert.equal(r.duplicates, 2); // same site and password twice in the file, and one already in the vault
+  assert.deepEqual(r.skipped, [{ line: 4, reason: 'no password' }, { line: 5, reason: 'password longer than 256 characters' }]);
+  const evil = r.items[1];
+  assert.equal(evil.title, '<img src=x onerror=alert(1)>'); // kept as text, shown as text
+  assert.equal(evil.url, ''); assert.equal(evil.username, 'me'); assert.equal(evil.password, 'pwd');
+  assert.ok(r.items.every((i) => /^[A-Za-z0-9-]{8,64}$/.test(i.id) && i.updatedAt > 0 && i.deleted === false));
+  assert.equal(new Set(r.items.map((i) => i.id)).size, 2);
+  assert.equal(core.importCsv(csv, existing.concat(r.items)).items.length, 0); // importing the same file twice adds nothing
+  assert.throws(() => core.importCsv('just some text'), { message: 'csv_empty' });
+  assert.throws(() => core.importCsv('a,b\n1,2\n'), { message: 'csv_no_password_column' });
+  assert.throws(() => core.importCsv('password\n' + 'x\n'.repeat(5001)), { message: 'csv_too_big' });
+});

@@ -91,6 +91,10 @@ const ERRORS = {
   pin_gone: 'The PIN on this device is no longer valid. Enter your master password.',
   need_master: 'Enter your master password on this device first.',
   too_many_devices: 'PIN unlock is already on for 10 devices. Turn it off on one first.',
+  csv_empty: 'That file has no entries in it.',
+  csv_no_password_column: 'That does not look like a password export. It needs a header row with a "password" column.',
+  csv_too_big: 'That file has more than 5,000 rows. Split it and import in parts.',
+  csv_none: 'Choose a CSV file first.',
   bio_unsupported: 'This browser or device does not support Face ID or Touch ID unlock for web apps.',
   bio_failed: 'Face ID or Touch ID did not complete. Try again, or use your master password.',
   need_title: 'Give this entry a name.',
@@ -433,7 +437,8 @@ function lock(message = '') {
   store.del('unlock').catch(() => {});
   if ($('itemDlg').open) $('itemDlg').close();
   for (const id of ['fTitle', 'fUser', 'fPass', 'fUrl', 'fNotes', 'search', 'importPass', 'cpCur', 'cpNew', 'cpNew2', 'recPass', 'qPass', 'qPin', 'qPin2']) $(id).value = '';
-  for (const id of ['healthMsg', 'cpMsg', 'recMsg', 'recCode', 'pinMsg', 'bioMsg']) $(id).textContent = '';
+  for (const id of ['healthMsg', 'cpMsg', 'recMsg', 'recCode', 'pinMsg', 'bioMsg', 'csvMsg']) $(id).textContent = '';
+  $('csvFile').value = '';
   $('recOut').hidden = true;
   $('list').replaceChildren();
   $('logList').replaceChildren();
@@ -1049,6 +1054,28 @@ $('bioOff').addEventListener('click', () => withButton($('bioOff'), $('bioMsg'),
   return bioName + ' unlock is off for this device. You can also delete the "Vault" passkey in your device password settings.';
 }));
 
+/* ---------- Import from CSV ---------- */
+
+$('csvBtn').addEventListener('click', () => withButton($('csvBtn'), $('csvMsg'), async () => {
+  const file = $('csvFile').files[0];
+  if (!file) throw new Error('csv_none');
+  if (file.size > 5 * 1024 * 1024) throw new Error('csv_too_big');
+  const { items, duplicates, skipped } = core.importCsv(await file.text(), S.items);
+  if (items.length) {
+    S.items = S.items.concat(items);
+    await persist();
+  }
+  $('csvFile').value = '';
+  const parts = [`Imported ${items.length} ${items.length === 1 ? 'entry' : 'entries'}.`];
+  if (duplicates) parts.push(`${duplicates} already in the vault, skipped.`);
+  if (skipped.length) {
+    const lines = skipped.slice(0, 8).map((x) => `line ${x.line} (${x.reason})`).join(', ');
+    parts.push(`${skipped.length} not imported: ${lines}${skipped.length > 8 ? ' and more' : ''}.`);
+  }
+  parts.push('Now delete the CSV file from this device.');
+  return parts.join(' ');
+}));
+
 /* ---------- Access log ---------- */
 
 let logEntries = [];
@@ -1102,9 +1129,11 @@ async function loadLog() {
     const where = r.where && typeof r.where === 'object' ? r.where : {};
     logEntries = (Array.isArray(r.entries) ? r.entries : []).map((en) => ({ ...en, where: typeof where[en.ip] === 'string' ? where[en.ip] : '' }));
     logIp = r.ip || '';
-    $('logScope').textContent = r.owner
-      ? 'You are the owner of this server, so this also lists failed attempts on usernames that do not exist and on other accounts.'
-      : '';
+    const notes = [];
+    if (r.owner) notes.push('You are the owner of this server, so this also lists failed attempts on usernames that do not exist and on other accounts.');
+    if (r.geo === 'failed') notes.push('City lookup did not return anything just now. The lookup service may be busy, or your hosting may block outgoing requests. It is tried again within the hour.');
+    if (r.geo === 'off') notes.push('City lookup is switched off in the server settings.');
+    $('logScope').textContent = notes.join(' ');
     renderLog();
   } catch (e) {
     msg.textContent = e.offline ? 'The access log needs internet.' : explain(e);

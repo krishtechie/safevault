@@ -21,5 +21,5 @@ return [
 
     // Optional. The access log shows a city and country for each address by asking this service.
     // Set to false to switch that off, so addresses are never sent to anyone.
-    // 'geo_url' => 'https://free.freeipapi.com/api/json/{ip}',
+    // 'geo_url' => 'https://free.freeipapi.com/api/v1/json/{ip}',
 ];

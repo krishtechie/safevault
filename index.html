@@ -240,6 +240,16 @@
         <div id="logList" class="log"></div>
       </div>
       <div class="card">
+        <h3>Import passwords</h3>
+        <p class="muted">Bring in a CSV export from Google or Chrome, Safari, Firefox, Edge, Bitwarden, 1Password, LastPass and similar. Entries already in the vault are skipped.</p>
+        <label>CSV file
+          <input id="csvFile" type="file" accept=".csv,text/csv,text/comma-separated-values,application/vnd.ms-excel,text/plain">
+        </label>
+        <button id="csvBtn" class="btn" type="button">Import from CSV</button>
+        <p id="csvMsg" class="msg"></p>
+        <p class="note">An export file holds every password in plain text. Delete it from your device and empty the trash as soon as the import is done.</p>
+      </div>
+      <div class="card">
         <h3>Backup</h3>
         <p class="muted">The backup file is encrypted with your master password. Keep a copy somewhere other than this server.</p>
         <button id="exportBtn" class="btn" type="button">Download encrypted backup</button>
