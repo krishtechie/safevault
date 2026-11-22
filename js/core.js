@@ -419,6 +419,15 @@ export const LOG_EVENTS = Object.freeze({
   recover_ok: ['Account recovered with the recovery key', 'change'],
   recover_fail: ['Failed recovery attempt: wrong recovery key', 'fail'],
   save: ['Vault changes saved', 'save'],
+  login_blocked: ['Sign-in blocked for 15 minutes after 5 wrong tries', 'fail'],
+  recover_blocked: ['Recovery blocked for 15 minutes after 5 wrong tries', 'fail'],
+  // The lines below reach only the server owner: attempts on names that do not exist or on other accounts.
+  login_fail_unknown: ['Failed sign-in: no account with that username', 'fail'],
+  login_blocked_unknown: ['Sign-in blocked for 15 minutes: repeated tries on a username that does not exist', 'fail'],
+  login_bad_name: ['Failed sign-in: text that cannot be a username', 'fail'],
+  recover_fail_unknown: ['Failed recovery attempt: no recovery key for that username', 'fail'],
+  recover_blocked_unknown: ['Recovery blocked for 15 minutes: repeated tries on an unknown username', 'fail'],
+  register_bad_invite: ['Sign-up attempt with a wrong invite code', 'fail'],
 });
 
 // type: all | signin | fail | change | save.  days: 0 means no time limit.
@@ -430,6 +439,6 @@ export function filterLog(entries, { type = 'all', days = 0, text = '', now = Da
     if (type === 'signin' && !['login_ok', 'pin_ok', 'bio_ok', 'logout', 'register'].includes(en.e)) return false;
     if (type !== 'all' && type !== 'signin' && kind !== type) return false;
     if (en.t < since) return false;
-    return !q || [label, en.ip, describeDevice(en.ua), en.ua].some((v) => String(v).toLowerCase().includes(q));
+    return !q || [label, en.ip, describeDevice(en.ua), en.ua, en.u || '', en.where || ''].some((v) => String(v).toLowerCase().includes(q));
   });
 }

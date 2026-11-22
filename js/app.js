@@ -1077,8 +1077,14 @@ function renderLog() {
     const sub = document.createElement('div');
     sub.className = 'log-sub';
     const when = new Date(en.t * 1000).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
-    sub.textContent = `${when} · ${core.describeDevice(en.ua)} · ${en.ip}`;
+    sub.textContent = `${when} · ${core.describeDevice(en.ua)} · ${en.ip}${en.where ? ' · ' + en.where : ''}`;
     main.append(title, sub);
+    if (en.u !== undefined && en.u !== S.username) {
+      const who = document.createElement('div');
+      who.className = 'log-sub log-who';
+      who.textContent = en.u ? 'Username tried: ' + en.u : 'No username was given';
+      main.append(who);
+    }
     row.append(dot, main);
     frag.append(row);
   }
@@ -1093,8 +1099,12 @@ async function loadLog() {
   msg.textContent = '';
   try {
     const r = await authed(() => api('log'));
-    logEntries = Array.isArray(r.entries) ? r.entries : [];
+    const where = r.where && typeof r.where === 'object' ? r.where : {};
+    logEntries = (Array.isArray(r.entries) ? r.entries : []).map((en) => ({ ...en, where: typeof where[en.ip] === 'string' ? where[en.ip] : '' }));
     logIp = r.ip || '';
+    $('logScope').textContent = r.owner
+      ? 'You are the owner of this server, so this also lists failed attempts on usernames that do not exist and on other accounts.'
+      : '';
     renderLog();
   } catch (e) {
     msg.textContent = e.offline ? 'The access log needs internet.' : explain(e);

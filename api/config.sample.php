@@ -14,4 +14,12 @@ return [
 
     // Set to false once your accounts exist to close sign-ups completely.
     'allow_registration' => true,
+
+    // Optional. The owner sees failed attempts against every username in the access log.
+    // Leave this out and the first account created on the server is the owner.
+    // 'owner' => 'yourusername',
+
+    // Optional. The access log shows a city and country for each address by asking this service.
+    // Set to false to switch that off, so addresses are never sent to anyone.
+    // 'geo_url' => 'https://free.freeipapi.com/api/json/{ip}',
 ];

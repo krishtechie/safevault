@@ -242,4 +242,15 @@ test('access log: readable device names and filters', () => {
   assert.deepEqual(f({ text: 'wrong pin' }), []);
   assert.deepEqual(f({ text: 'MASTER PASSWORD CHANGED' }), ['rekey']);
   assert.deepEqual(f({ type: 'fail', days: 1, text: 'python' }), ['login_fail']);
+  const owner = [
+    { t: sec - 5, e: 'login_fail_unknown', ip: '198.51.100.9', ua: 'x', u: 'admin', where: 'Lagos, Nigeria' },
+    { t: sec - 6, e: 'login_blocked', ip: '198.51.100.9', ua: 'x', where: '' },
+    { t: sec - 7, e: 'register_bad_invite', ip: '203.0.113.5', ua: 'x', u: 'mallory', where: 'Toronto, Ontario, Canada' },
+  ];
+  const g = (o) => core.filterLog(owner, { now, ...o }).map((x) => x.e);
+  assert.deepEqual(g({ type: 'fail' }), ['login_fail_unknown', 'login_blocked', 'register_bad_invite']);
+  assert.deepEqual(g({ text: 'ADMIN' }), ['login_fail_unknown']);
+  assert.deepEqual(g({ text: 'toronto' }), ['register_bad_invite']);
+  assert.deepEqual(g({ text: '15 minutes' }), ['login_blocked']);
+  for (const k of ['login_fail_unknown', 'login_blocked_unknown', 'login_bad_name', 'recover_fail_unknown', 'recover_blocked', 'recover_blocked_unknown', 'register_bad_invite', 'login_blocked']) assert.equal(core.LOG_EVENTS[k][1], 'fail');
 });

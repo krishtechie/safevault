@@ -228,13 +228,14 @@
             </select>
           </label>
         </div>
-        <label>Search device or address
-          <input id="logSearch" type="search" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="e.g. iPhone, Chrome, 203.0">
+        <label>Search device, place, address or username
+          <input id="logSearch" type="search" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="e.g. iPhone, Toronto, 203.0, a username">
         </label>
         <div class="row">
           <button id="logRefresh" class="btn small" type="button">Refresh</button>
           <span id="logCount" class="muted"></span>
         </div>
+        <p id="logScope" class="muted"></p>
         <p id="logMsg" class="msg"></p>
         <div id="logList" class="log"></div>
       </div>

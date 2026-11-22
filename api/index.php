@@ -33,7 +33,7 @@ if ($dataDir === '' || strlen($secret) < 32 || str_contains($secret, 'CHANGE_ME'
     || strlen($invite) < 12 || str_contains($invite, 'CHANGE_ME')) {
     fail(500, 'not_configured');
 }
-foreach (['', '/users', '/vaults', '/throttle', '/sessions', '/pins', '/logs'] as $sub) {
+foreach (['', '/users', '/vaults', '/throttle', '/sessions', '/pins', '/logs', '/geo'] as $sub) {
     if (!is_dir($dataDir . $sub) && !@mkdir($dataDir . $sub, 0700, true)) fail(500, 'data_dir_unwritable');
 }
 // The data folder must live outside the web root.
@@ -195,11 +195,103 @@ const DUMMY_HASH = '$2y$10$nHYP29y/FHhGZsklg8tTnOhhQCqOj3m25uhIv9MBJYchFv.hAECve
 $userFile  = fn(string $u) => "$dataDir/users/$u.json";
 $vaultFile = fn(string $u) => "$dataDir/vaults/$u.json";
 
+// Access log: one line per event, per account. Kept to the most recent 500 events.
+$audit = function (string $u, string $event, ?string $typed = null) use ($dataDir, $ip): void {
+    // $u = '_server' is the server-wide log of attempts that belong to no account (or to someone else's).
+    $file = "$dataDir/logs/$u.log";
+    $ua = substr((string)preg_replace('/[^\x20-\x7E]/', '', (string)($_SERVER['HTTP_USER_AGENT'] ?? '')), 0, 200);
+    $row = ['t' => time(), 'e' => $event, 'ip' => $ip, 'ua' => $ua];
+    if ($typed !== null) $row['u'] = substr((string)preg_replace('/[^\x21-\x7E]/', '', $typed), 0, 40);
+    $line = json_encode($row, JSON_UNESCAPED_SLASHES) . "\n";
+    $new = !is_file($file);
+    @file_put_contents($file, $line, FILE_APPEND | LOCK_EX);
+    if ($new) @chmod($file, 0600);
+    clearstatcache(true, $file);
+    if ((int)@filesize($file) > 160000) {
+        with_lock($file . '.lock', function () use ($file) {
+            $lines = file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [];
+            file_put_contents($file, implode("\n", array_slice($lines, -500)) . "\n", LOCK_EX);
+        });
+    }
+};
+
+// Failed and blocked attempts are also copied to the server-wide log with the username that was typed,
+// so the owner sees attempts against names that do not exist and against other accounts.
+$auditFail = function (string $typed, string $event, bool $exists) use ($audit): void {
+    $name = valid_username($typed) ?? '';
+    if ($exists && $name !== '') $audit($name, $event);
+    $audit('_server', $exists ? $event : $event . '_unknown', $typed);
+};
+// The owner is the account named in config ('owner'), or else the first account created on this server.
+$isOwner = function (string $u) use ($cfg, $dataDir): bool {
+    if (!empty($cfg['owner'])) return strtolower((string)$cfg['owner']) === $u;
+    $first = null;
+    $firstAt = PHP_INT_MAX;
+    foreach (glob($dataDir . '/users/*.json') ?: [] as $f) {
+        $at = (int)(read_json($f)['created'] ?? PHP_INT_MAX);
+        if ($at < $firstAt) { $firstAt = $at; $first = basename($f, '.json'); }
+    }
+    return $first === $u;
+};
+// City and country for an address, looked up only when the log is viewed and cached for 30 days.
+// Set 'geo_url' => false in config.php to switch this off (addresses are then never sent anywhere).
+$geo = function (array $ips) use ($cfg, $dataDir): array {
+    $tpl = array_key_exists('geo_url', $cfg) ? $cfg['geo_url'] : 'https://free.freeipapi.com/api/json/{ip}';
+    $out = [];
+    $deadline = microtime(true) + 6;
+    $fetched = 0;
+    foreach (array_unique($ips) as $addr) {
+        if (!filter_var($addr, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) continue;
+        $file = $dataDir . '/geo/' . hash('sha256', $addr) . '.json';
+        $hit = read_json($file);
+        if ($hit && (int)($hit['until'] ?? 0) > time()) {
+            if (($hit['where'] ?? '') !== '') $out[$addr] = $hit['where'];
+            continue;
+        }
+        if (!is_string($tpl) || $tpl === '' || $fetched >= 12 || microtime(true) > $deadline) continue;
+        $fetched++;
+        $url = str_replace('{ip}', rawurlencode($addr), $tpl);
+        $raw = false;
+        if (function_exists('curl_init')) {
+            $ch = curl_init($url);
+            curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 2, CURLOPT_CONNECTTIMEOUT => 2,
+                CURLOPT_FOLLOWLOCATION => false, CURLOPT_HTTPHEADER => ['Accept: application/json']]);
+            $raw = curl_exec($ch);
+        } elseif (ini_get('allow_url_fopen')) {
+            $raw = @file_get_contents($url, false, stream_context_create(['http' => ['timeout' => 2, 'header' => "Accept: application/json\r\n"]]), 0, 20000);
+        }
+        $j = is_string($raw) ? json_decode(substr($raw, 0, 20000), true) : null;
+        $parts = [];
+        if (is_array($j)) {
+            foreach ([['city', 'cityName'], ['region', 'regionName', 'region_name'], ['country', 'countryName', 'country_name']] as $keys) {
+                foreach ($keys as $k) {
+                    if (is_string($j[$k] ?? null) && trim($j[$k]) !== '') {
+                        $v = mb_substr(trim((string)preg_replace('/[\x00-\x1f\x7f<>]/u', '', $j[$k])), 0, 60);
+                        if ($v !== '' && $v !== '-' && !in_array($v, $parts, true)) $parts[] = $v;
+                        break;
+                    }
+                }
+            }
+        }
+        $where = implode(', ', $parts);
+        // A failed lookup is retried after an hour, a good one is kept for 30 days.
+        write_json($file, ['where' => $where, 'until' => time() + ($where === '' ? 3600 : 30 * 86400)]);
+        if ($where !== '') $out[$addr] = $where;
+    }
+    return $out;
+};
+
 // Checks a secret against a stored hash with throttling. Unknown users get a dummy hash so timing reveals nothing.
-$verify = function (string $kind, string $u, mixed $secretIn, ?string $hash) use ($ip): bool {
+$verify = function (string $kind, string $u, mixed $secretIn, ?string $hash) use ($ip, $auditFail): bool {
     $keyPair = "$kind:$ip|$u";
     $keyIp   = "$kind-ip:$ip";
-    if (throttle_count($keyPair, 900) >= 5 || throttle_count($keyIp, 900) >= 30) fail(429, 'slow_down');
+    if (throttle_count($keyPair, 900) >= 5 || throttle_count($keyIp, 900) >= 30) {
+        if (throttle_count("blocknote:$keyPair", 900) === 0) { // one log line per lockout, not one per blocked try
+            throttle_hit("blocknote:$keyPair", 900);
+            $auditFail($u, $kind === 'recover' ? 'recover_blocked' : 'login_blocked', $hash !== null);
+        }
+        fail(429, 'slow_down');
+    }
     $ok = b64_len($secretIn) === 32 && password_verify((string)$secretIn, $hash ?? DUMMY_HASH) && $hash !== null;
     if (!$ok) {
         throttle_hit($keyPair, 900);
@@ -233,23 +325,6 @@ $clearPins = function (string $u) use ($dataDir): void {
 };
 const PIN_TRIES = 3;
 
-// Access log: one line per event, per account. Kept to the most recent 500 events.
-$audit = function (string $u, string $event) use ($dataDir, $ip): void {
-    $file = "$dataDir/logs/$u.log";
-    $ua = substr((string)preg_replace('/[^\x20-\x7E]/', '', (string)($_SERVER['HTTP_USER_AGENT'] ?? '')), 0, 200);
-    $line = json_encode(['t' => time(), 'e' => $event, 'ip' => $ip, 'ua' => $ua], JSON_UNESCAPED_SLASHES) . "\n";
-    $new = !is_file($file);
-    @file_put_contents($file, $line, FILE_APPEND | LOCK_EX);
-    if ($new) @chmod($file, 0600);
-    clearstatcache(true, $file);
-    if ((int)@filesize($file) > 160000) {
-        with_lock($file . '.lock', function () use ($file) {
-            $lines = file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [];
-            file_put_contents($file, implode("\n", array_slice($lines, -500)) . "\n", LOCK_EX);
-        });
-    }
-};
-
 /* ---------- Actions ---------- */
 
 switch ($method . ' ' . $action) {
@@ -257,7 +332,14 @@ switch ($method . ' ' . $action) {
 case 'POST prelogin': {
     // Returns the salt and KDF settings needed to derive keys on a new device.
     // Unknown usernames get a stable fake salt so accounts cannot be enumerated.
-    $u = valid_username($body['username'] ?? null) ?? fail(400, 'bad_username');
+    $u = valid_username($body['username'] ?? null);
+    if ($u === null) {
+        if (throttle_count("badname-ip:$ip", 900) < 20) { // bounded, so junk cannot flood the log
+            throttle_hit("badname-ip:$ip", 900);
+            $audit('_server', 'login_bad_name', is_string($body['username'] ?? null) ? $body['username'] : '');
+        }
+        fail(400, 'bad_username');
+    }
     if (throttle_count("pre-ip:$ip", 900) >= 60) fail(429, 'slow_down');
     throttle_hit("pre-ip:$ip", 900);
     $user = read_json($userFile($u));
@@ -271,6 +353,7 @@ case 'POST register': {
     if (throttle_count("reg-ip:$ip", 3600) >= 5) fail(429, 'slow_down');
     if (!hash_equals($invite, (string)($body['invite'] ?? ''))) {
         throttle_hit("reg-ip:$ip", 3600);
+        $audit('_server', 'register_bad_invite', is_string($body['username'] ?? null) ? $body['username'] : '');
         fail(403, 'bad_invite');
     }
     $u   = valid_username($body['username'] ?? null) ?? fail(400, 'bad_username');
@@ -300,7 +383,7 @@ case 'POST login': {
     $u = valid_username($body['username'] ?? null) ?? fail(400, 'bad_username');
     $user = read_json($userFile($u));
     if (!$verify('login', $u, $body['auth'] ?? null, $user['auth_hash'] ?? null)) {
-        if ($user) $audit($u, 'login_fail');
+        $auditFail($u, 'login_fail', (bool)$user);
         fail(401, 'bad_credentials');
     }
     sign_in($u, (int)($user['gen'] ?? 0));
@@ -387,7 +470,7 @@ case 'POST recover_start': {
     $u = valid_username($body['username'] ?? null) ?? fail(400, 'bad_username');
     $user = read_json($userFile($u));
     if (!$verify('recover', $u, $body['recAuth'] ?? null, $user['rec']['auth_hash'] ?? null)) {
-        if ($user) $audit($u, 'recover_fail');
+        $auditFail($u, 'recover_fail', (bool)$user);
         fail(401, 'bad_credentials');
     }
     out(200, ['recWrap' => $user['rec']['wrap']]);
@@ -397,7 +480,10 @@ case 'POST recover_finish': {
     // Step 2: set a new master password. The vault itself is not touched.
     $u = valid_username($body['username'] ?? null) ?? fail(400, 'bad_username');
     $user = read_json($userFile($u));
-    if (!$verify('recover', $u, $body['recAuth'] ?? null, $user['rec']['auth_hash'] ?? null)) fail(401, 'bad_credentials');
+    if (!$verify('recover', $u, $body['recAuth'] ?? null, $user['rec']['auth_hash'] ?? null)) {
+        $auditFail($u, 'recover_fail', (bool)$user);
+        fail(401, 'bad_credentials');
+    }
     $kdf = valid_kdf($body['kdf'] ?? null) ?? fail(400, 'bad_kdf');
     if (b64_len($body['salt'] ?? null) !== 16) fail(400, 'bad_salt');
     if (b64_len($body['newAuth'] ?? null) !== 32) fail(400, 'bad_auth');
@@ -472,17 +558,32 @@ case 'POST pin_clear': {
 }
 
 case 'GET log': {
-    // The account's access log, newest first.
+    // The account's access log, newest first. The owner also gets the server-wide failed attempts.
     $u = require_user();
-    $file = "$dataDir/logs/$u.log";
-    $entries = [];
-    foreach (array_reverse(array_slice(is_file($file) ? (file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: []) : [], -500)) as $line) {
-        $row = json_decode($line, true);
-        if (is_array($row) && is_int($row['t'] ?? null) && is_string($row['e'] ?? null)) {
-            $entries[] = ['t' => $row['t'], 'e' => $row['e'], 'ip' => (string)($row['ip'] ?? ''), 'ua' => (string)($row['ua'] ?? '')];
+    $read = function (string $name) use ($dataDir): array {
+        $file = "$dataDir/logs/$name.log";
+        $rows = [];
+        foreach (array_slice(is_file($file) ? (file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: []) : [], -500) as $line) {
+            $row = json_decode($line, true);
+            if (is_array($row) && is_int($row['t'] ?? null) && is_string($row['e'] ?? null)) {
+                $e = ['t' => $row['t'], 'e' => $row['e'], 'ip' => (string)($row['ip'] ?? ''), 'ua' => (string)($row['ua'] ?? '')];
+                if (isset($row['u'])) $e['u'] = (string)$row['u'];
+                $rows[] = $e;
+            }
         }
+        return $rows;
+    };
+    $entries = $read($u);
+    $owner = $isOwner($u);
+    if ($owner) {
+        // Attempts on this account are already in its own log; add everything aimed at other names.
+        foreach ($read('_server') as $row) if (($row['u'] ?? '') !== $u) $entries[] = $row;
     }
-    out(200, ['entries' => $entries, 'ip' => $ip]);
+    // Newest first; events in the same second keep the order they were written in.
+    foreach ($entries as $i => $row) $entries[$i]['i'] = $i;
+    usort($entries, fn($x, $y) => [$y['t'], $y['i']] <=> [$x['t'], $x['i']]);
+    $entries = array_map(function ($row) { unset($row['i']); return $row; }, array_slice($entries, 0, 500));
+    out(200, ['entries' => $entries, 'ip' => $ip, 'owner' => $owner, 'where' => (object)$geo(array_column($entries, 'ip'))]);
 }
 
 case 'POST note': {
