@@ -15,7 +15,8 @@ Runs on ordinary shared hosting (PHP 8.1+, no database). The front end is plain 
 | Recovery | Optional recovery key (160 random bits, shown once). It wraps the same vault key, so a forgotten master password can be replaced without the server ever being able to open the vault |
 | PIN unlock | Optional, per device. The key that opens the vault is split in two random halves: one on the device, one on the server. The server releases its half only for the right PIN and destroys it after three wrong tries, after which the master password is required. Needs a connection |
 | Face ID / Touch ID | Optional, per device. Uses a passkey with the WebAuthn PRF extension: the device's secure hardware releases a secret only after a successful face or fingerprint check. Works offline |
-| Stay unlocked | Optional. The vault key is held as a non-extractable browser key until the auto-lock time passes, so a page reload does not ask for the password again |
+| Access log | The server records each sign-in, failed attempt and security change with time, address and browser (latest 500 per account). Settings shows it in plain words with filters by type, period and search. It never contains keys or passwords |
+| Stay unlocked | Optional. The vault key is held as a non-extractable browser key until the auto-lock time passes, so a page reload does not ask for the password again. Closing and reopening the app always asks to unlock, with Face ID offered at once when it is on |
 | Server knowledge | Only a bcrypt hash of the sign-in key and the encrypted vault blob. A full server breach exposes no passwords |
 | Sync | Revision numbers with conflict detection. Devices merge per entry (newest edit wins, deletions sync) |
 | Offline | An encrypted copy is kept on each device, so the vault opens without internet. An offline notice shows, and changes sync by themselves once the connection returns |

@@ -335,19 +335,29 @@ async function unlockWithBio() {
   await openWithVaultKey(q, vkRaw);
 }
 
-$('bioBtn').addEventListener('click', async () => {
+let bioBusy = false;
+// quiet = started by the app itself (on launch or on return), so a refusal shows no error:
+// some browsers only allow Face ID after a tap, and the button is right there.
+async function runBio(quiet) {
+  if (bioBusy || S.encKey || !quick || !quick.bio) return;
+  bioBusy = true;
   const btn = $('bioBtn');
-  $('authMsg').textContent = '';
+  if (!quiet) $('authMsg').textContent = '';
   btn.disabled = true;
   try {
     await unlockWithBio();
     enterApp();
+    authed(() => api('note', { e: 'bio_ok' })).catch(() => {});
   } catch (e) {
-    $('authMsg').textContent = explain(e);
+    if (!quiet) $('authMsg').textContent = explain(e);
   } finally {
     btn.disabled = false;
+    bioBusy = false;
   }
-});
+}
+$('bioBtn').addEventListener('click', () => runBio(false));
+// Coming back to a locked app: offer Face ID straight away.
+document.addEventListener('visibilitychange', () => { if (!document.hidden && !S.encKey && (mode === 'unlock' || mode === 'pin')) runBio(true); });
 
 $('authSwitch').addEventListener('click', () => setAuthMode(mode === 'pin' ? 'unlock' : 'pin'));
 $('authToggle').addEventListener('click', () => setAuthMode(mode === 'unlock' ? 'register' : 'unlock'));
@@ -390,6 +400,7 @@ $('authForm').addEventListener('submit', async (ev) => {
 function setAuthModeLabel() { $('authBtn').textContent = { unlock: 'Unlock', pin: 'Unlock', register: 'Create account', recover: 'Set new master password' }[mode]; }
 
 function enterApp(activeAt = Date.now()) {
+  try { sessionStorage.setItem('vaultOpen', '1'); } catch { /* storage blocked */ }
   $('auth').hidden = true;
   $('app').hidden = false;
   $('whoami').textContent = S.username;
@@ -425,6 +436,9 @@ function lock(message = '') {
   for (const id of ['healthMsg', 'cpMsg', 'recMsg', 'recCode', 'pinMsg', 'bioMsg']) $(id).textContent = '';
   $('recOut').hidden = true;
   $('list').replaceChildren();
+  $('logList').replaceChildren();
+  logEntries = [];
+  $('logCount').textContent = '';
   $('healthOut').replaceChildren();
   $('genOut').textContent = '';
   $('app').hidden = true;
@@ -470,7 +484,10 @@ async function tryRestore() {
   const u = await store.get('unlock');
   if (!u) return false;
   const cached = await store.get('state');
-  const fresh = stayOn() && cached && cached.username === u.username && Date.now() - u.lastActive <= lockMs();
+  // Session storage survives a reload but not closing the app or tab, so a fresh launch always asks again.
+  let sameSession = false;
+  try { sameSession = sessionStorage.getItem('vaultOpen') === '1'; } catch { /* storage blocked */ }
+  const fresh = sameSession && stayOn() && cached && cached.username === u.username && Date.now() - u.lastActive <= lockMs();
   try {
     if (!fresh) throw new Error('expired');
     const items = await core.decryptVault(u.key, u.username, cached.blob);
@@ -589,7 +606,7 @@ function showView(name) {
   for (const v of ['vault', 'generator', 'health', 'settings']) $('view-' + v).hidden = v !== name;
   for (const t of document.querySelectorAll('.tab')) t.classList.toggle('active', t.dataset.view === name);
 }
-for (const t of document.querySelectorAll('.tab')) t.addEventListener('click', () => showView(t.dataset.view));
+for (const t of document.querySelectorAll('.tab')) t.addEventListener('click', () => { showView(t.dataset.view); if (t.dataset.view === 'settings') loadLog(); });
 
 const live = () => S.items.filter((it) => !it.deleted);
 
@@ -1022,14 +1039,70 @@ $('bioOn').addEventListener('click', () => withButton($('bioOn'), $('bioMsg'), a
   quick = q;
   await saveQuick();
   $('qPass').value = '';
-  return bioName + ' unlock is on for this device.';
+  authed(() => api('note', { e: 'bio_on' })).catch(() => {});
+  return bioName + ' unlock is on for this device. Opening the app will now ask for it.';
 }));
 
 $('bioOff').addEventListener('click', () => withButton($('bioOff'), $('bioMsg'), async () => {
   const q = quickFor(S.username);
-  if (q) { delete q.bio; await saveQuick(); }
+  if (q) { delete q.bio; await saveQuick(); authed(() => api('note', { e: 'bio_off' })).catch(() => {}); }
   return bioName + ' unlock is off for this device. You can also delete the "Vault" passkey in your device password settings.';
 }));
+
+/* ---------- Access log ---------- */
+
+let logEntries = [];
+let logIp = '';
+
+function renderLog() {
+  const rows = core.filterLog(logEntries, { type: $('logType').value, days: +$('logDays').value, text: $('logSearch').value });
+  const frag = document.createDocumentFragment();
+  for (const en of rows.slice(0, 200)) {
+    const [label, kind] = core.LOG_EVENTS[en.e] || ['Other activity', 'ok'];
+    const row = document.createElement('div');
+    row.className = 'log-row ' + kind;
+    const dot = document.createElement('span');
+    dot.className = 'log-dot ' + kind;
+    const main = document.createElement('div');
+    main.className = 'log-main';
+    const title = document.createElement('div');
+    title.className = 'log-title';
+    title.textContent = label;
+    if (en.ip === logIp && en.ua === navigator.userAgent) {
+      const tag = document.createElement('span');
+      tag.className = 'log-tag';
+      tag.textContent = 'This device';
+      title.append(tag);
+    }
+    const sub = document.createElement('div');
+    sub.className = 'log-sub';
+    const when = new Date(en.t * 1000).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+    sub.textContent = `${when} · ${core.describeDevice(en.ua)} · ${en.ip}`;
+    main.append(title, sub);
+    row.append(dot, main);
+    frag.append(row);
+  }
+  $('logList').replaceChildren(frag);
+  $('logCount').textContent = rows.length
+    ? `${Math.min(rows.length, 200)} of ${rows.length} matching events`
+    : (logEntries.length ? 'No events match these filters.' : '');
+}
+
+async function loadLog() {
+  const msg = $('logMsg');
+  msg.textContent = '';
+  try {
+    const r = await authed(() => api('log'));
+    logEntries = Array.isArray(r.entries) ? r.entries : [];
+    logIp = r.ip || '';
+    renderLog();
+  } catch (e) {
+    msg.textContent = e.offline ? 'The access log needs internet.' : explain(e);
+  }
+}
+for (const id of ['logType', 'logDays']) $(id).addEventListener('change', renderLog);
+$('logSearch').addEventListener('input', renderLog);
+$('logRefresh').addEventListener('click', loadLog);
 
 $('exportBtn').addEventListener('click', async () => {
   const blob = await core.encryptVault(S.encKey, S.username, S.items);
@@ -1095,5 +1168,6 @@ setAuthMode('unlock');
   const c = await store.get('state').catch(() => null);
   if (c?.username) $('aUser').value = c.username;
   setAuthMode(restingMode());
+  runBio(true); // opening the app asks for Face ID at once when it is turned on
 })();
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});

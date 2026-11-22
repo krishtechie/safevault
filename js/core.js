@@ -384,3 +384,52 @@ export function findReused(items) {
   }
   return [...byPw.values()].filter((g) => g.length > 1);
 }
+
+/* ---------- Access log helpers ---------- */
+
+// Turns a browser's user-agent text into something readable, such as "iPhone · Safari".
+export function describeDevice(ua) {
+  const s = String(ua || '');
+  const device = /iPhone/.test(s) ? 'iPhone' : /iPad/.test(s) ? 'iPad' : /Android/.test(s) ? 'Android'
+    : /Macintosh|Mac OS X/.test(s) ? 'Mac' : /Windows/.test(s) ? 'Windows PC' : /CrOS/.test(s) ? 'Chromebook'
+      : /Linux/.test(s) ? 'Linux' : 'Unknown device';
+  const browser = /Edg\//.test(s) ? 'Edge' : /OPR\//.test(s) ? 'Opera' : /Firefox\/|FxiOS/.test(s) ? 'Firefox'
+    : /CriOS|Chrome\//.test(s) ? 'Chrome' : /Safari\//.test(s) ? 'Safari'
+      : /curl|python|wget|bot|http/i.test(s) ? 'Script or tool' : 'Unknown browser';
+  return device + ' · ' + browser;
+}
+
+// kind: ok (normal), fail (someone got it wrong), change (a security setting changed), save (vault edits)
+export const LOG_EVENTS = Object.freeze({
+  register: ['Account created', 'change'],
+  login_ok: ['Signed in with master password', 'ok'],
+  login_fail: ['Failed sign-in: wrong master password', 'fail'],
+  logout: ['Signed out', 'ok'],
+  pin_ok: ['Unlocked with PIN', 'ok'],
+  pin_fail: ['Wrong PIN entered', 'fail'],
+  pin_locked: ['PIN turned off after 3 wrong tries', 'fail'],
+  pin_set: ['PIN unlock turned on', 'change'],
+  pin_clear: ['PIN unlock turned off', 'change'],
+  bio_ok: ['Unlocked with Face ID or Touch ID', 'ok'],
+  bio_on: ['Face ID or Touch ID turned on', 'change'],
+  bio_off: ['Face ID or Touch ID turned off', 'change'],
+  rekey: ['Master password changed', 'change'],
+  recovery_set: ['Recovery key created', 'change'],
+  recovery_clear: ['Recovery key removed', 'change'],
+  recover_ok: ['Account recovered with the recovery key', 'change'],
+  recover_fail: ['Failed recovery attempt: wrong recovery key', 'fail'],
+  save: ['Vault changes saved', 'save'],
+});
+
+// type: all | signin | fail | change | save.  days: 0 means no time limit.
+export function filterLog(entries, { type = 'all', days = 0, text = '', now = Date.now() } = {}) {
+  const q = text.trim().toLowerCase();
+  const since = days > 0 ? now / 1000 - days * 86400 : 0;
+  return entries.filter((en) => {
+    const [label, kind] = LOG_EVENTS[en.e] || ['Other activity', 'ok'];
+    if (type === 'signin' && !['login_ok', 'pin_ok', 'bio_ok', 'logout', 'register'].includes(en.e)) return false;
+    if (type !== 'all' && type !== 'signin' && kind !== type) return false;
+    if (en.t < since) return false;
+    return !q || [label, en.ip, describeDevice(en.ua), en.ua].some((v) => String(v).toLowerCase().includes(q));
+  });
+}

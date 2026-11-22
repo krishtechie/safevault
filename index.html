@@ -207,6 +207,38 @@
         </div>
       </div>
       <div class="card">
+        <h3>Access log</h3>
+        <p class="muted">Every sign-in, failed attempt and security change on your account, from any device. The server keeps the latest 500 events.</p>
+        <div class="split">
+          <label>Show
+            <select id="logType">
+              <option value="all">All activity</option>
+              <option value="signin">Sign-ins and unlocks</option>
+              <option value="fail">Failed attempts</option>
+              <option value="change">Security changes</option>
+              <option value="save">Vault saves</option>
+            </select>
+          </label>
+          <label>From
+            <select id="logDays">
+              <option value="1">Last 24 hours</option>
+              <option value="7" selected>Last 7 days</option>
+              <option value="30">Last 30 days</option>
+              <option value="0">All time</option>
+            </select>
+          </label>
+        </div>
+        <label>Search device or address
+          <input id="logSearch" type="search" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="e.g. iPhone, Chrome, 203.0">
+        </label>
+        <div class="row">
+          <button id="logRefresh" class="btn small" type="button">Refresh</button>
+          <span id="logCount" class="muted"></span>
+        </div>
+        <p id="logMsg" class="msg"></p>
+        <div id="logList" class="log"></div>
+      </div>
+      <div class="card">
         <h3>Backup</h3>
         <p class="muted">The backup file is encrypted with your master password. Keep a copy somewhere other than this server.</p>
         <button id="exportBtn" class="btn" type="button">Download encrypted backup</button>

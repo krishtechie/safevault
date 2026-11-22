@@ -33,7 +33,7 @@ if ($dataDir === '' || strlen($secret) < 32 || str_contains($secret, 'CHANGE_ME'
     || strlen($invite) < 12 || str_contains($invite, 'CHANGE_ME')) {
     fail(500, 'not_configured');
 }
-foreach (['', '/users', '/vaults', '/throttle', '/sessions', '/pins'] as $sub) {
+foreach (['', '/users', '/vaults', '/throttle', '/sessions', '/pins', '/logs'] as $sub) {
     if (!is_dir($dataDir . $sub) && !@mkdir($dataDir . $sub, 0700, true)) fail(500, 'data_dir_unwritable');
 }
 // The data folder must live outside the web root.
@@ -233,6 +233,23 @@ $clearPins = function (string $u) use ($dataDir): void {
 };
 const PIN_TRIES = 3;
 
+// Access log: one line per event, per account. Kept to the most recent 500 events.
+$audit = function (string $u, string $event) use ($dataDir, $ip): void {
+    $file = "$dataDir/logs/$u.log";
+    $ua = substr((string)preg_replace('/[^\x20-\x7E]/', '', (string)($_SERVER['HTTP_USER_AGENT'] ?? '')), 0, 200);
+    $line = json_encode(['t' => time(), 'e' => $event, 'ip' => $ip, 'ua' => $ua], JSON_UNESCAPED_SLASHES) . "\n";
+    $new = !is_file($file);
+    @file_put_contents($file, $line, FILE_APPEND | LOCK_EX);
+    if ($new) @chmod($file, 0600);
+    clearstatcache(true, $file);
+    if ((int)@filesize($file) > 160000) {
+        with_lock($file . '.lock', function () use ($file) {
+            $lines = file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [];
+            file_put_contents($file, implode("\n", array_slice($lines, -500)) . "\n", LOCK_EX);
+        });
+    }
+};
+
 /* ---------- Actions ---------- */
 
 switch ($method . ' ' . $action) {
@@ -275,20 +292,26 @@ case 'POST register': {
     @chmod($userFile($u), 0600);
     write_json($vaultFile($u), ['rev' => 1, 'blob' => $body['blob'], 'updated' => time()]);
     sign_in($u, 0);
+    $audit($u, 'register');
     out(200, ['rev' => 1]);
 }
 
 case 'POST login': {
     $u = valid_username($body['username'] ?? null) ?? fail(400, 'bad_username');
     $user = read_json($userFile($u));
-    if (!$verify('login', $u, $body['auth'] ?? null, $user['auth_hash'] ?? null)) fail(401, 'bad_credentials');
+    if (!$verify('login', $u, $body['auth'] ?? null, $user['auth_hash'] ?? null)) {
+        if ($user) $audit($u, 'login_fail');
+        fail(401, 'bad_credentials');
+    }
     sign_in($u, (int)($user['gen'] ?? 0));
+    $audit($u, 'login_ok');
     $v = read_json($vaultFile($u));
     out(200, ['rev' => (int)($v['rev'] ?? 0), 'wrap' => $user['wrap'] ?? null, 'recovery' => !empty($user['rec'])]);
 }
 
 case 'POST logout': {
-    start_session();
+    $who = current_user();
+    if ($who !== null) $audit($who, 'logout');
     $_SESSION = [];
     session_destroy();
     out(200, ['ok' => true]);
@@ -331,6 +354,7 @@ case 'POST rekey': {
     });
     $clearPins($u); // PINs on every device stop working until set again
     sign_in($u, $user['gen']);
+    $audit($u, 'rekey');
     out(200, ['ok' => true]);
 }
 
@@ -345,6 +369,7 @@ case 'POST recovery_set': {
         $user['rec'] = ['auth_hash' => password_hash($body['recAuth'], PASSWORD_DEFAULT), 'wrap' => $body['recWrap'], 'created' => time()];
         return $user;
     });
+    $audit($u, 'recovery_set');
     out(200, ['recovery' => true]);
 }
 
@@ -353,6 +378,7 @@ case 'POST recovery_clear': {
     $user = read_json($userFile($u)) ?? fail(404, 'no_account');
     if (!$verify('login', $u, $body['auth'] ?? null, $user['auth_hash'] ?? null)) fail(401, 'bad_credentials');
     $updateUser($u, function (array $user) { $user['rec'] = null; return $user; });
+    $audit($u, 'recovery_clear');
     out(200, ['recovery' => false]);
 }
 
@@ -360,7 +386,10 @@ case 'POST recover_start': {
     // Forgotten master password, step 1: prove knowledge of the recovery key, receive the wrapped vault key.
     $u = valid_username($body['username'] ?? null) ?? fail(400, 'bad_username');
     $user = read_json($userFile($u));
-    if (!$verify('recover', $u, $body['recAuth'] ?? null, $user['rec']['auth_hash'] ?? null)) fail(401, 'bad_credentials');
+    if (!$verify('recover', $u, $body['recAuth'] ?? null, $user['rec']['auth_hash'] ?? null)) {
+        if ($user) $audit($u, 'recover_fail');
+        fail(401, 'bad_credentials');
+    }
     out(200, ['recWrap' => $user['rec']['wrap']]);
 }
 
@@ -383,6 +412,7 @@ case 'POST recover_finish': {
     });
     $clearPins($u);
     sign_in($u, $user['gen']);
+    $audit($u, 'recover_ok');
     $v = read_json($vaultFile($u));
     out(200, ['rev' => (int)($v['rev'] ?? 0)]);
 }
@@ -403,6 +433,7 @@ case 'POST pin_set': {
         'user' => $u, 'hash' => password_hash($body['pinAuth'], PASSWORD_DEFAULT), 'ksrv' => $body['ksrv'],
         'fails' => 0, 'created' => time(),
     ]);
+    $audit($u, 'pin_set');
     out(200, ['ok' => true]);
 }
 
@@ -410,21 +441,24 @@ case 'POST pin_unlock': {
     // No session needed: the device id is a 128-bit random value known only to that device.
     $file = $pinFile($body['deviceId'] ?? null);
     if (throttle_count("pin-ip:$ip", 900) >= 30) fail(429, 'slow_down');
-    with_lock($file . '.lock', function () use ($file, $body, $ip) {
+    with_lock($file . '.lock', function () use ($file, $body, $ip, $audit) {
         $rec = read_json($file);
         if (!$rec) { @unlink($file . '.lock'); fail(404, 'pin_gone'); }
         $ok = b64_len($body['pinAuth'] ?? null) === 32 && password_verify((string)$body['pinAuth'], (string)$rec['hash']);
         if ($ok) {
             if ((int)$rec['fails'] !== 0) { $rec['fails'] = 0; write_json($file, $rec); }
+            $audit((string)$rec['user'], 'pin_ok');
             out(200, ['ksrv' => $rec['ksrv']]);
         }
         throttle_hit("pin-ip:$ip", 900);
         $rec['fails'] = (int)$rec['fails'] + 1;
         if ($rec['fails'] >= PIN_TRIES) {
             @unlink($file); // the key half is destroyed: only the master password opens this device now
+            $audit((string)$rec['user'], 'pin_locked');
             fail(403, 'pin_locked');
         }
         write_json($file, $rec);
+        $audit((string)$rec['user'], 'pin_fail');
         out(401, ['error' => 'bad_pin', 'left' => PIN_TRIES - $rec['fails']]);
     });
 }
@@ -433,7 +467,30 @@ case 'POST pin_clear': {
     $u = require_user();
     $file = $pinFile($body['deviceId'] ?? null);
     $rec = read_json($file);
-    if ($rec && ($rec['user'] ?? null) === $u) { @unlink($file); @unlink($file . '.lock'); }
+    if ($rec && ($rec['user'] ?? null) === $u) { @unlink($file); @unlink($file . '.lock'); $audit($u, 'pin_clear'); }
+    out(200, ['ok' => true]);
+}
+
+case 'GET log': {
+    // The account's access log, newest first.
+    $u = require_user();
+    $file = "$dataDir/logs/$u.log";
+    $entries = [];
+    foreach (array_reverse(array_slice(is_file($file) ? (file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: []) : [], -500)) as $line) {
+        $row = json_decode($line, true);
+        if (is_array($row) && is_int($row['t'] ?? null) && is_string($row['e'] ?? null)) {
+            $entries[] = ['t' => $row['t'], 'e' => $row['e'], 'ip' => (string)($row['ip'] ?? ''), 'ua' => (string)($row['ua'] ?? '')];
+        }
+    }
+    out(200, ['entries' => $entries, 'ip' => $ip]);
+}
+
+case 'POST note': {
+    // Events that happen only on the device (Face ID) are reported here so they appear in the log.
+    $u = require_user();
+    $e = (string)($body['e'] ?? '');
+    if (!in_array($e, ['bio_ok', 'bio_on', 'bio_off'], true)) fail(400, 'bad_event');
+    $audit($u, $e);
     out(200, ['ok' => true]);
 }
 
@@ -449,13 +506,14 @@ case 'POST save': {
     if (!valid_blob($body['blob'] ?? null)) fail(400, 'bad_blob');
     if (!is_int($body['baseRev'] ?? null)) fail(400, 'bad_rev');
     $file = $vaultFile($u);
-    with_lock($file . '.lock', function () use ($file, $body) {
+    with_lock($file . '.lock', function () use ($file, $body, $audit, $u) {
         $v = read_json($file) ?? ['rev' => 0, 'blob' => null];
         // Another device saved first: hand back the newer copy so the client can merge and retry.
         if ((int)$v['rev'] !== $body['baseRev']) out(409, ['error' => 'conflict', 'rev' => (int)$v['rev'], 'blob' => $v['blob']]);
         if ($v['blob'] !== null) @copy($file, $file . '.prev'); // keep one previous version
         $rev = (int)$v['rev'] + 1;
         write_json($file, ['rev' => $rev, 'blob' => $body['blob'], 'updated' => time()]);
+        $audit($u, 'save');
         out(200, ['rev' => $rev]);
     });
 }

@@ -213,3 +213,33 @@ test('Face ID key: same device secret opens, a different one does not', async ()
   await assert.rejects(async () => core.unwrapKey(await core.bioKek(core.randomBytes(32).buffer), 'user', wrap, 'bio'));
   await assert.rejects(core.bioKek(new Uint8Array(4).buffer));
 });
+
+test('access log: readable device names and filters', () => {
+  assert.equal(core.describeDevice('Mozilla/5.0 (iPhone; CPU iPhone OS 27_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0 Mobile/15E148 Safari/604.1'), 'iPhone · Safari');
+  assert.equal(core.describeDevice('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'), 'Mac · Chrome');
+  assert.equal(core.describeDevice('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36 Edg/140.0'), 'Windows PC · Edge');
+  assert.equal(core.describeDevice('python-requests/2.32'), 'Unknown device · Script or tool');
+  assert.equal(core.describeDevice(''), 'Unknown device · Unknown browser');
+  const now = 1_800_000_000_000; const sec = now / 1000;
+  const log = [
+    { t: sec - 60, e: 'login_ok', ip: '203.0.113.5', ua: 'iPhone Safari/604' },
+    { t: sec - 3600, e: 'login_fail', ip: '198.51.100.9', ua: 'python-requests/2.32' },
+    { t: sec - 2 * 86400, e: 'pin_locked', ip: '203.0.113.5', ua: 'iPhone Safari/604' },
+    { t: sec - 10 * 86400, e: 'rekey', ip: '203.0.113.5', ua: 'Macintosh Chrome/140' },
+    { t: sec - 40 * 86400, e: 'save', ip: '203.0.113.5', ua: 'Macintosh Chrome/140' },
+    { t: sec - 30, e: 'something_new', ip: '203.0.113.5', ua: '' },
+  ];
+  const f = (o) => core.filterLog(log, { now, ...o }).map((x) => x.e);
+  assert.deepEqual(f({}), log.map((x) => x.e));
+  assert.deepEqual(f({ days: 1 }), ['login_ok', 'login_fail', 'something_new']);
+  assert.deepEqual(f({ days: 7 }), ['login_ok', 'login_fail', 'pin_locked', 'something_new']);
+  assert.deepEqual(f({ type: 'fail' }), ['login_fail', 'pin_locked']);
+  assert.deepEqual(f({ type: 'change' }), ['rekey']);
+  assert.deepEqual(f({ type: 'save' }), ['save']);
+  assert.deepEqual(f({ type: 'signin' }), ['login_ok']);
+  assert.deepEqual(f({ text: '198.51' }), ['login_fail']);
+  assert.deepEqual(f({ text: 'script' }), ['login_fail']);
+  assert.deepEqual(f({ text: 'wrong pin' }), []);
+  assert.deepEqual(f({ text: 'MASTER PASSWORD CHANGED' }), ['rekey']);
+  assert.deepEqual(f({ type: 'fail', days: 1, text: 'python' }), ['login_fail']);
+});
