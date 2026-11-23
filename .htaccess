@@ -22,6 +22,9 @@ Options -Indexes
 # Never serve the Git folder or dotfiles (.git, .gitignore)
 <IfModule mod_alias.c>
   RedirectMatch 404 /\.git
+  # Developer files have no reason to be served from the live site
+  RedirectMatch 404 /tests/
+  RedirectMatch 404 /README\.md$
 </IfModule>
 <FilesMatch "^\.">
   Require all denied

@@ -36,6 +36,15 @@ if ($dataDir === '' || strlen($secret) < 32 || str_contains($secret, 'CHANGE_ME'
 foreach (['', '/users', '/vaults', '/throttle', '/sessions', '/pins', '/logs', '/geo'] as $sub) {
     if (!is_dir($dataDir . $sub) && !@mkdir($dataDir . $sub, 0700, true)) fail(500, 'data_dir_unwritable');
 }
+// Housekeeping, on roughly one request in forty: remove attempt counters and location answers that have
+// expired, so the data folder cannot grow without limit under a flood of junk sign-in attempts.
+if (random_int(1, 40) === 1) {
+    foreach (['throttle' => 7200, 'geo' => 32 * 86400] as $sub => $maxAge) {
+        foreach (glob("$dataDir/$sub/*") ?: [] as $old) {
+            if ((int)@filemtime($old) < time() - $maxAge) @unlink($old);
+        }
+    }
+}
 // The data folder must live outside the web root.
 $realData = realpath($dataDir);
 $docRoot  = realpath($_SERVER['DOCUMENT_ROOT'] ?? '') ?: '';
