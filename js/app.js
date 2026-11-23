@@ -189,7 +189,14 @@ async function keepTrust(username, token) {
   await store.set('trust', trust).catch(() => {});
 }
 // Signs in again with what is in memory (session expired). Never has a code to offer.
-const relogin = () => api('login', loginBody(S.username, S.auth));
+// Several requests can find the session expired at the same moment; they share one sign-in.
+let reloginBusy = null;
+const relogin = () => {
+  if (!reloginBusy) {
+    reloginBusy = api('login', { ...loginBody(S.username, S.auth), auto: true }).finally(() => { reloginBusy = null; });
+  }
+  return reloginBusy;
+};
 
 async function signIn(username, keys) {
   const r = await api('login', loginBody(username, keys.auth, $('totpField').hidden ? '' : $('aTotp').value.replace(/\D/g, '')));

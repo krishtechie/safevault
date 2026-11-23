@@ -403,6 +403,7 @@ export function describeDevice(ua) {
 export const LOG_EVENTS = Object.freeze({
   register: ['Account created', 'change'],
   login_ok: ['Signed in with master password', 'ok'],
+  login_renew: ['Session renewed by the app (no password typed)', 'ok'],
   login_fail: ['Failed sign-in: wrong master password', 'fail'],
   logout: ['Signed out', 'ok'],
   pin_ok: ['Unlocked with PIN', 'ok'],

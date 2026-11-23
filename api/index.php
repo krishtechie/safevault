@@ -487,7 +487,9 @@ case 'POST login': {
         $audit($u, 'device_trusted');
     }
     sign_in($u, (int)($user['gen'] ?? 0));
-    $audit($u, 'login_ok');
+    // 'auto' marks the app renewing its own session after a Face ID or PIN unlock, with no password typed.
+    // It only changes the wording in the log. The same key and the same checks are required either way.
+    $audit($u, ($body['auto'] ?? false) === true ? 'login_renew' : 'login_ok');
     $v = read_json($vaultFile($u));
     $res = ['rev' => (int)($v['rev'] ?? 0), 'wrap' => $user['wrap'] ?? null, 'recovery' => !empty($user['rec']), 'totp' => !empty($user['totp'])];
     if ($newTrust !== null) $res['trust'] = $newTrust;
