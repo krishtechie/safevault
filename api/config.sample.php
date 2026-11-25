@@ -23,10 +23,12 @@ return [
     // Set to false to switch that off, so addresses are never sent to anyone.
     // 'geo_url' => 'https://free.freeipapi.com/api/v1/json/{ip}',
 
-    // Optional. Email alerts: a new device signing in, a blocked sign-in, a password change, a recovery,
-    // two-factor turned off, a device signed out. Leave out to send no email.
+    // Optional. Email alerts, sent for every sign-in, every failed attempt (wrong master password, PIN or
+    // authenticator code), new devices, and every security change. Leave out to send no email.
     // The address stays in this file on the server and never reaches GitHub.
     // 'alert_email' => 'you@example.com',
+    // Optional. Events to leave out of the emails, by their log name. For example, to skip ordinary sign-ins:
+    // 'alert_skip' => ['login_ok'],
     // Optional sender address. Defaults to vault@ your site's domain.
     // 'alert_from' => 'vault@example.com',
 ];

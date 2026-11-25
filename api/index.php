@@ -219,6 +219,14 @@ $vaultFile = fn(string $u) => "$dataDir/vaults/$u.json";
 // Access log: one line per event, per account. Kept to the most recent 500 events.
 // Email alerts for the events worth knowing about straight away. Off unless 'alert_email' is set in config.php.
 const ALERT_EVENTS = [
+    'login_ok'       => 'You signed in to your vault',
+    'login_fail'     => 'A sign-in attempt on your vault failed',
+    'pin_fail'       => 'A wrong PIN was entered',
+    'totp_fail'      => 'A wrong authenticator code was entered',
+    'recover_fail'   => 'An account recovery attempt failed',
+    'recover_blocked' => 'Account recovery was blocked after 5 wrong attempts',
+    'totp_on'        => 'Two-factor sign-in was turned on',
+    'recovery_set'   => 'A recovery key was created',
     'device_new'     => 'Your vault was opened on a new device',
     'device_refused' => 'A signed-out device tried to connect and was refused',
     'device_off'     => 'A device was signed out from another device',
@@ -233,9 +241,10 @@ const ALERT_EVENTS = [
 $alert = function (string $u, string $event) use ($cfg, $ip): void {
     $to = $cfg['alert_email'] ?? null;
     if (!is_string($to) || !filter_var($to, FILTER_VALIDATE_EMAIL) || !isset(ALERT_EVENTS[$event]) || $u === '_server') return;
-    // At most one email per kind of event every 10 minutes, and 12 an hour in all, so a flood of attempts cannot flood the inbox.
-    if (throttle_count("mail:$u|$event", 600) >= 1 || throttle_count('mail-all', 3600) >= 12) return;
-    throttle_hit("mail:$u|$event", 600);
+    if (in_array($event, (array)($cfg['alert_skip'] ?? []), true)) return;
+    // Every event sends its own email, as a bank would. The one limit is 40 an hour, so a flood of
+    // attempts cannot bury the inbox or get the sending address suspended. The Access log still records all of them.
+    if (throttle_count('mail-all', 3600) >= 40) return;
     throttle_hit('mail-all', 3600);
     $host = (string)($_SERVER['HTTP_HOST'] ?? '');
     $domain = preg_match('/^[A-Za-z0-9.-]{1,100}(:\d{1,5})?$/', $host) ? explode(':', $host)[0] : 'vault';
@@ -255,8 +264,8 @@ $alert = function (string $u, string $event) use ($cfg, $ip): void {
     if (!$sent) @mail($to, 'Vault notice: ' . ALERT_EVENTS[$event], $text, $headers);
 };
 
-$audit = function (string $u, string $event, ?string $typed = null) use ($dataDir, $ip, $alert): void {
-    $alert($u, $event);
+$audit = function (string $u, string $event, ?string $typed = null, bool $quiet = false) use ($dataDir, $ip, $alert): void {
+    if (!$quiet) $alert($u, $event);
     // $u = '_server' is the server-wide log of attempts that belong to no account (or to someone else's).
     $file = "$dataDir/logs/$u.log";
     $ua = substr((string)preg_replace('/[^\x20-\x7E]/', '', (string)($_SERVER['HTTP_USER_AGENT'] ?? '')), 0, 200);
@@ -627,10 +636,12 @@ case 'POST login': {
         $audit($u, 'device_trusted');
     }
     sign_in($u, (int)($user['gen'] ?? 0));
-    if ($touchDevice($u, $trustHash($body['trust'] ?? null))) $audit($u, 'device_new');
+    $isNew = $touchDevice($u, $trustHash($body['trust'] ?? null));
+    if ($isNew) $audit($u, 'device_new');
     // 'auto' marks the app renewing its own session after a Face ID or PIN unlock, with no password typed.
     // It only changes the wording in the log. The same key and the same checks are required either way.
-    $audit($u, ($body['auto'] ?? false) === true ? 'login_renew' : 'login_ok');
+    // A new device already sent its own notice just above, so the sign-in itself stays quiet that once.
+    $audit($u, ($body['auto'] ?? false) === true ? 'login_renew' : 'login_ok', null, $isNew);
     $v = read_json($vaultFile($u));
     $res = ['rev' => (int)($v['rev'] ?? 0), 'wrap' => $user['wrap'] ?? null, 'recovery' => !empty($user['rec']), 'totp' => !empty($user['totp'])];
     if ($newTrust !== null) $res['trust'] = $newTrust;
