@@ -246,7 +246,9 @@ $alert = function (string $u, string $event) use ($cfg, $ip): void {
         . "Account: $u\r\nWhen: " . gmdate('D, d M Y H:i') . " UTC\r\nAddress: $ip\r\nBrowser: $ua\r\n\r\n"
         . "The full record is in the app under Settings, Access log. If this was not you, sign that device out under Settings, Devices.\r\n";
     $from = is_string($cfg['alert_from'] ?? null) && filter_var($cfg['alert_from'], FILTER_VALIDATE_EMAIL) ? $cfg['alert_from'] : "vault@$domain";
-    $headers = "From: Vault <$from>\r\nReply-To: $from\r\nContent-Type: text/plain; charset=UTF-8\r\nX-Auto-Response-Suppress: All";
+    // Some hosts add their own X-PHP-Script header in front of these and run the first line into it,
+    // which loses that line. A spare first header takes that hit so From always survives.
+    $headers = "X-Vault-Notice: 1\r\nFrom: Vault <$from>\r\nReply-To: $from\r\nContent-Type: text/plain; charset=UTF-8\r\nX-Auto-Response-Suppress: All";
     // Name the sender on the envelope too. Without it the hosting account's own login is used, which
     // receiving mail servers see as a mismatch and tend to file as spam. If the host refuses that, send plainly.
     $sent = preg_match('/^[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+$/', $from) && @mail($to, 'Vault notice: ' . ALERT_EVENTS[$event], $text, $headers, '-f' . $from);
