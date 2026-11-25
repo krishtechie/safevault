@@ -556,6 +556,8 @@ export const LOG_EVENTS = Object.freeze({
   device_trusted: ['New device approved with an authenticator code', 'change'],
   device_off: ['A device was signed out from another device', 'change'],
   device_new: ['Signed in on a new device', 'change'],
+  backup_used: ['Signed in with a two-factor backup code', 'change'],
+  backup_new: ['New two-factor backup codes created', 'change'],
   history_restore: ['Vault restored to an earlier version', 'change'],
   device_refused: ['A signed-out device tried to connect and was refused', 'fail'],
   login_blocked: ['Sign-in blocked for 15 minutes after 5 wrong tries', 'fail'],

@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="vault-build" content="18">
+<meta name="vault-build" content="19">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://api.pwnedpasswords.com; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
@@ -54,9 +54,12 @@
     <label id="inviteField" hidden>Invite code
       <input id="aInvite" type="password" autocomplete="off">
     </label>
-    <label id="totpField" hidden>Authenticator code
-      <input id="aTotp" class="pin" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code">
-    </label>
+    <div id="totpField" hidden>
+      <label><span id="totpLabel">Authenticator code</span>
+        <input id="aTotp" class="pin" type="text" inputmode="numeric" maxlength="6" autocomplete="one-time-code" autocapitalize="none" autocorrect="off" spellcheck="false">
+      </label>
+      <button id="totpAlt" class="link" type="button">Use a backup code instead</button>
+    </div>
     <label id="pinField" hidden>PIN
       <input id="aPin" class="pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="off">
     </label>
@@ -227,6 +230,22 @@
           <button id="tfaOn" class="btn primary" type="button">Turn on</button>
         </div>
         <p id="tfaMsg" class="msg"></p>
+        <div id="tfaBackup" hidden>
+          <h4>Backup codes</h4>
+          <p id="backupStatus" class="muted"></p>
+          <p class="muted">Ten single-use codes for signing in when your authenticator is not at hand. Each works once. Creating new ones cancels the old ones. Enter your master password above first.</p>
+          <button id="backupNew" class="btn" type="button">Create backup codes</button>
+          <div id="backupShow" class="fix" hidden>
+            <p>Save these now. They are shown only this once.</p>
+            <output id="backupCodes" class="rec-code backup-codes"></output>
+            <div class="row wrap">
+              <button id="backupCopy" class="btn small" type="button">Copy all</button>
+              <button id="backupSave" class="btn small" type="button">Download as a file</button>
+              <button id="backupHide" class="btn small" type="button">I have saved them</button>
+            </div>
+          </div>
+          <p id="backupMsg" class="msg"></p>
+        </div>
       </details>
       <details id="devFold" class="card fold" name="settings">
         <summary><h3>Devices</h3><span class="fold-sub">Where your account is signed in</span></summary>

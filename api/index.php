@@ -230,6 +230,8 @@ const ALERT_EVENTS = [
     'recover_fail'   => 'An account recovery attempt failed',
     'recover_blocked' => 'Account recovery was blocked after 5 wrong attempts',
     'totp_on'        => 'Two-factor sign-in was turned on',
+    'backup_used'    => 'A backup code was used to sign in',
+    'backup_new'     => 'New backup codes were created',
     'recovery_set'   => 'A recovery key was created',
     'device_new'     => 'Your vault was opened on a new device',
     'device_refused' => 'A signed-out device tried to connect and was refused',
@@ -244,7 +246,7 @@ const ALERT_EVENTS = [
 ];
 // Which colour the notice carries: green for a normal sign-in, red for a failed or refused attempt, amber for a change.
 const ALERT_TONES = [
-    'login_ok' => 'ok', 'device_new' => 'new',
+    'login_ok' => 'ok', 'device_new' => 'new', 'backup_used' => 'fail',
     'login_fail' => 'fail', 'pin_fail' => 'fail', 'totp_fail' => 'fail', 'recover_fail' => 'fail', 'recover_blocked' => 'fail',
     'login_blocked' => 'fail', 'pin_locked' => 'fail', 'device_refused' => 'fail',
 ];
@@ -337,12 +339,29 @@ function alert_html(string $title, string $tone, array $rows, string $foot, ?str
     return $out;
 }
 
-$alert = function (string $u, string $event) use ($cfg, $ip): void {
+$alert = function (string $u, string $event) use ($cfg, $ip, $dh, $dataDir): void {
     $to = $cfg['alert_email'] ?? null;
     if (!is_string($to) || !filter_var($to, FILTER_VALIDATE_EMAIL) || !isset(ALERT_EVENTS[$event]) || $u === '_server') return;
     if (in_array($event, (array)($cfg['alert_skip'] ?? []), true)) return;
-    // Every event sends its own email, as a bank would. The one limit is 40 an hour, so a flood of
-    // attempts cannot bury the inbox or get the sending address suspended. The Access log still records all of them.
+    // Which events are worth an email. The default, 'smart', sends what a person would want to be interrupted for:
+    // a new device, any security change, a block, a backup code being used. It leaves out the everyday noise:
+    // signing in on a device already known, and a mistyped PIN or password on one of your own devices.
+    // A wrong master password or wrong authenticator code from a device the account has never seen still sends,
+    // once per 15 minutes, since that is someone else trying. 'alert_level' => 'all' in config.php sends everything.
+    if (($cfg['alert_level'] ?? 'smart') !== 'all') {
+        if ($event === 'login_ok' || $event === 'pin_fail') return;
+        if (in_array($event, ['login_fail', 'totp_fail', 'recover_fail'], true)) {
+            $known = false;
+            if ($dh !== null && $event === 'login_fail') {
+                $rec = read_json("$dataDir/users/$u.json");
+                $known = isset($rec['devices'][$dh]) && empty($rec['devices'][$dh]['off']);
+            }
+            if ($known || throttle_count("mailq:$u|$event", 900) >= 1) return;
+            throttle_hit("mailq:$u|$event", 900);
+        }
+    }
+    // The one hard limit is 40 an hour, so a flood of attempts cannot bury the inbox or get the sending
+    // address suspended. The Access log still records every event.
     if (throttle_count('mail-all', 3600) >= 40) return;
     throttle_hit('mail-all', 3600);
     $host = (string)($_SERVER['HTTP_HOST'] ?? '');
@@ -591,6 +610,15 @@ function totp_code(string $key, int $counter): string {
     return str_pad((string)($n % 1000000), 6, '0', STR_PAD_LEFT);
 }
 // Returns the matching time step (so a code cannot be used twice) or null. Accepts one step either side for clock drift.
+// Backup codes: ten single-use codes for when the authenticator is not at hand. Only a keyed hash of each is stored,
+// so the server file does not reveal them. Letters that are easy to confuse (i, l, o, 0, 1) are never used.
+const BACKUP_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
+function backup_clean(mixed $typed): ?string {
+    if (!is_string($typed)) return null;
+    $c = strtolower((string)preg_replace('/[\s-]/', '', $typed));
+    return preg_match('/^[' . BACKUP_ALPHABET . ']{10}$/', $c) ? $c : null;
+}
+
 function totp_match(string $key, mixed $code, int $lastStep): ?int {
     if (!is_string($code) || !preg_match('/^\d{6}$/', $code)) return null;
     $now = intdiv(time(), 30);
@@ -617,6 +645,7 @@ $totpOpen = function (mixed $sealed) use ($totpKey): ?string {
 };
 // A device that has passed the code check once gets a random token. Only its hash is stored.
 $trustHash = fn(mixed $t): ?string => b64_len($t) === 32 ? hash('sha256', (string)base64_decode($t, true)) : null;
+$backupHash = fn(string $code): string => hash_hmac('sha256', $code, $totpKey);
 $isTrusted = function (array $user, mixed $token) use ($trustHash): bool {
     $h = $trustHash($token);
     if ($h === null) return false;
@@ -731,8 +760,23 @@ case 'POST login': {
         $key = $totpOpen($user['totp']['secret'] ?? null) ?? fail(500, 'totp_unreadable');
         $newTrust = base64_encode(random_bytes(32));
         $step = null;
-        $updateUser($u, function (array $fresh) use ($key, $body, &$step, $newTrust, $trustHash, $dh) {
+        $usedBackup = false;
+        $backupLeft = null;
+        $updateUser($u, function (array $fresh) use ($key, $body, &$step, &$usedBackup, &$backupLeft, $newTrust, $trustHash, $dh, $backupHash) {
             $step = totp_match($key, $body['totp'], (int)($fresh['totp']['last'] ?? 0));
+            if ($step === null && ($clean = backup_clean($body['totp'])) !== null) {
+                // Not a 6-digit code: try it as a backup code. A match is removed, so each works once.
+                $want = $backupHash($clean);
+                foreach ($fresh['totp']['backup'] ?? [] as $i => $h) {
+                    if (hash_equals((string)$h, $want)) {
+                        array_splice($fresh['totp']['backup'], $i, 1);
+                        $usedBackup = true;
+                        $backupLeft = count($fresh['totp']['backup']);
+                        $step = (int)($fresh['totp']['last'] ?? 0);
+                        break;
+                    }
+                }
+            }
             if ($step === null) return $fresh;
             $fresh['totp']['last'] = $step;
             $ua = substr((string)preg_replace('/[^\x20-\x7E]/', '', (string)($_SERVER['HTTP_USER_AGENT'] ?? '')), 0, 200);
@@ -748,7 +792,7 @@ case 'POST login': {
             out(401, ['error' => 'bad_totp']);
         }
         throttle_clear($tk);
-        $audit($u, 'device_trusted');
+        $audit($u, $usedBackup ? 'backup_used' : 'device_trusted');
     }
     sign_in($u, (int)($user['gen'] ?? 0));
     $isNew = $touchDevice($u, $trustHash($body['trust'] ?? null));
@@ -760,6 +804,7 @@ case 'POST login': {
     $v = read_json($vaultFile($u));
     $res = ['rev' => (int)($v['rev'] ?? 0), 'wrap' => $user['wrap'] ?? null, 'recovery' => !empty($user['rec']), 'totp' => !empty($user['totp'])];
     if ($newTrust !== null) $res['trust'] = $newTrust;
+    if (($backupLeft ?? null) !== null) $res['backupLeft'] = $backupLeft;
     out(200, $res);
 }
 
@@ -781,6 +826,32 @@ case 'POST totp_enable': {
     });
     $audit($u, 'totp_on');
     out(200, ['totp' => true, 'trust' => $trust]);
+}
+
+case 'POST totp_backup': {
+    // Make ten new backup codes. Any earlier ones stop working. Shown once; only their hashes are kept.
+    $u = require_user();
+    $user = read_json($userFile($u)) ?? fail(404, 'no_account');
+    if (!$verify('login', $u, $body['auth'] ?? null, $user['auth_hash'] ?? null)) fail(401, 'bad_credentials');
+    if (empty($user['totp'])) fail(400, 'totp_off');
+    $codes = [];
+    $n = strlen(BACKUP_ALPHABET);
+    for ($i = 0; $i < 10; $i++) {
+        $c = '';
+        for ($j = 0; $j < 10; $j++) $c .= BACKUP_ALPHABET[random_int(0, $n - 1)];
+        $codes[] = $c;
+    }
+    $hashes = array_map($backupHash, $codes);
+    $ok = false;
+    $updateUser($u, function (array $fresh) use ($hashes, &$ok) {
+        if (empty($fresh['totp'])) return $fresh;
+        $fresh['totp']['backup'] = $hashes;
+        $ok = true;
+        return $fresh;
+    });
+    if (!$ok) fail(400, 'totp_off');
+    $audit($u, 'backup_new');
+    out(200, ['codes' => array_map(fn($c) => substr($c, 0, 5) . '-' . substr($c, 5), $codes)]);
 }
 
 case 'POST totp_disable': {
@@ -808,7 +879,7 @@ case 'POST logout': {
 case 'GET account': {
     $u = require_user();
     $user = read_json($userFile($u)) ?? fail(404, 'no_account');
-    out(200, ['wrap' => $user['wrap'] ?? null, 'recovery' => !empty($user['rec']), 'totp' => !empty($user['totp'])]);
+    out(200, ['wrap' => $user['wrap'] ?? null, 'recovery' => !empty($user['rec']), 'totp' => !empty($user['totp']), 'backup' => count($user['totp']['backup'] ?? [])]);
 }
 
 case 'POST setwrap': {

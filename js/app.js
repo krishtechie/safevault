@@ -8,7 +8,7 @@ const API = 'api/index.php';
 // The page and this script are published together. Right after an update a browser can hold one of them from
 // before; the missing parts would then stop the app from starting. When they do not match, fetch fresh copies
 // and reload, once.
-const BUILD = '18';
+const BUILD = '19';
 {
   const page = document.querySelector('meta[name="vault-build"]');
   let tried = false;
@@ -61,6 +61,23 @@ const didReady = (async () => {
   try { const d = await store.get('device'); if (d && typeof d.id === 'string') { did = d.id; return; } } catch { /* storage unavailable */ }
   await newDid();
 })();
+
+// The second sign-in step takes a 6-digit authenticator code, or one of the backup codes.
+let backupMode = false;
+let notice = '';
+function setBackupMode(on) {
+  backupMode = on;
+  const i = $('aTotp');
+  i.value = '';
+  i.maxLength = on ? 11 : 6;
+  i.inputMode = on ? 'text' : 'numeric';
+  i.autocomplete = on ? 'off' : 'one-time-code';
+  i.placeholder = on ? 'xxxxx-xxxxx' : '';
+  i.classList.toggle('code-text', on);
+  $('totpLabel').textContent = on ? 'Backup code' : 'Authenticator code';
+  $('totpAlt').textContent = on ? 'Use the authenticator code instead' : 'Use a backup code instead';
+}
+const typedCode = () => (backupMode ? $('aTotp').value.trim().toLowerCase() : $('aTotp').value.replace(/\D/g, ''));
 
 async function api(action, body, query = '') {
   await didReady;
@@ -136,6 +153,7 @@ const ERRORS = {
   bad_recovery_code: 'That recovery key is not valid. It has 32 letters and numbers.',
   bad_recovery: 'Wrong username or recovery key.',
   bad_current: 'The current master password is wrong.',
+  need_current: 'Enter your current master password first.',
   weak: 'Master password is too weak. Use at least 12 characters; a 5 or 6 word passphrase works well.',
   mismatch: 'The two passwords do not match.',
   need_username: 'Enter your username.',
@@ -155,6 +173,8 @@ const ERRORS = {
   bio_failed: 'Face ID or Touch ID did not complete. Try again, or use your master password.',
   totp_required: 'Enter the 6-digit code from your authenticator app.',
   bad_totp: 'That code is not right, or it was already used. Wait for the next code and try again.',
+  bad_backup: 'That backup code is not right, or it was already used.',
+  totp_off: 'Two-factor sign-in is off, so there are no backup codes to make.',
   bad_secret: 'Could not set up the authenticator. Start the setup again.',
   totp_lost: 'This device needs your authenticator code again. Unlock with your master password.',
   bad_totp_secret: 'That authenticator key is not valid. Paste the key the site shows during two-factor setup, or its otpauth:// link.',
@@ -207,6 +227,7 @@ function setAuthMode(m) {
   $('authMsg').textContent = '';
   $('aPin').value = '';
   $('totpField').hidden = true;
+  setBackupMode(false);
   $('aTotp').value = '';
   const focus = { pin: 'aPin', unlock: $('aUser').value ? 'aPass' : 'aUser' }[m];
   if (focus && !$('auth').hidden) $(focus).focus();
@@ -257,7 +278,8 @@ const relogin = () => {
 };
 
 async function signIn(username, keys) {
-  const r = await api('login', loginBody(username, keys.auth, $('totpField').hidden ? '' : $('aTotp').value.replace(/\D/g, '')));
+  const r = await api('login', loginBody(username, keys.auth, $('totpField').hidden ? '' : typedCode()));
+  if (typeof r.backupLeft === 'number') notice = `Backup code used. ${r.backupLeft} left` + (r.backupLeft < 3 ? '. Create new ones in Settings' : '');
   await keepTrust(username, r.trust);
   const vkRaw = r.wrap ? await core.unwrapKey(keys.kek, username, r.wrap) : keys.legacyRaw;
   // If the upgrade call fails (for example mid-deploy), carry on; it is retried at the next unlock.
@@ -492,8 +514,11 @@ $('authForm').addEventListener('submit', async (ev) => {
     else await unlock(username, password);
     for (const id of ['aPass', 'aPass2', 'aInvite', 'aRec', 'aPin', 'aTotp']) $(id).value = '';
     $('totpField').hidden = true;
+    setBackupMode(false);
     enterApp();
     if (started === 'recover') toast('New master password set');
+    else if (notice) toast(notice);
+    notice = '';
   } catch (e) {
     $('aPin').value = '';
     if (started === 'pin' && ['pin_locked', 'pin_gone', 'need_master'].includes(e.message)) setAuthMode('unlock');
@@ -502,7 +527,7 @@ $('authForm').addEventListener('submit', async (ev) => {
       $('aTotp').value = '';
       $('aTotp').focus();
     }
-    msg.textContent = explain(e);
+    msg.textContent = e.message === 'bad_totp' && backupMode ? ERRORS.bad_backup : explain(e);
   } finally {
     btn.disabled = false;
     setAuthModeLabel();
@@ -559,6 +584,11 @@ function lock(message = '') {
   $('histList').replaceChildren();
   $('histMsg').textContent = '';
   histOpen = null;
+  backupList = null;
+  $('backupCodes').textContent = '';
+  $('backupShow').hidden = true;
+  $('backupMsg').textContent = '';
+  $('backupStatus').textContent = '';
   $('healthBadge').hidden = true;
   $('healthSum').textContent = '';
   $('toast').classList.remove('show', 'has-action');
@@ -820,7 +850,7 @@ function showView(name) {
   if (name === 'vault' && wideScreen() && !$('itemDlg').open) setTimeout(() => $('search').focus(), 0);
   for (const t of document.querySelectorAll('.tab')) t.classList.toggle('active', t.dataset.view === name);
 }
-for (const t of document.querySelectorAll('.tab')) t.addEventListener('click', () => { showView(t.dataset.view); if (t.dataset.view === 'settings') { loadLog(); loadDevices(); } if (t.dataset.view === 'health') refreshHealth(); });
+for (const t of document.querySelectorAll('.tab')) t.addEventListener('click', () => { showView(t.dataset.view); if (t.dataset.view === 'settings') { loadLog(); loadDevices(); loadAccountInfo(); } if (t.dataset.view === 'health') refreshHealth(); });
 
 const live = () => S.items.filter((it) => !it.deleted && !it.trashedAt);
 const trashed = () => S.items.filter((it) => !it.deleted && it.trashedAt).sort((a, b) => b.trashedAt - a.trashedAt);
@@ -1363,6 +1393,7 @@ function renderAccount() {
     : 'Off. Anyone who learns your master password could sign in from their own device.';
   $('tfaBegin').hidden = S.totp;
   $('tfaOff').hidden = !S.totp;
+  renderBackup();
   const q = quickFor(S.username);
   $('pinBtn').textContent = q && q.pin ? 'Change PIN' : 'Set PIN';
   $('pinOff').hidden = !(q && q.pin);
@@ -1384,6 +1415,7 @@ async function authed(fn) {
 
 // Re-enter the current master password before any sensitive change. Returns its keys and the raw vault key.
 async function confirmMaster(password) {
+  if (!password) throw new Error('need_current');
   const keys = await core.deriveKeys(password, S.salt, S.kdf);
   if (keys.auth !== S.auth) throw new Error('bad_current');
   if (!S.wrap) { // account not upgraded yet (this device was offline since the update)
@@ -1583,17 +1615,21 @@ $('tfaOn').addEventListener('click', () => withButton($('tfaOn'), $('tfaMsg'), a
   $('tfaCode').value = '';
   $('tfaKey').textContent = '';
   $('tfaQr').replaceChildren();
-  return 'Two-factor sign-in is on. This device stays signed in; any other device will need a code once.';
+  S.backup = 0;
+  renderAccount();
+  return 'Two-factor sign-in is on. This device stays signed in; any other device will need a code once. Create backup codes below in case you lose the authenticator.';
 }));
 
 $('tfaOff').addEventListener('click', () => withButton($('tfaOff'), $('tfaMsg'), async () => {
   const { keys } = await confirmMaster($('tfaPass').value);
   await authed(() => api('totp_disable', { auth: keys.auth }));
   S.totp = false;
+  S.backup = 0;
   trust = null;
   await store.del('trust').catch(() => {});
   await patchCache();
   $('tfaPass').value = '';
+  renderAccount();
   return 'Two-factor sign-in is off.';
 }));
 $('tfaCopy').addEventListener('click', () => copy($('tfaKey').textContent.replace(/\s/g, ''), 'Key copied'));
@@ -1746,6 +1782,52 @@ $('signOutBtn').addEventListener('click', async () => {
   lock();
   $('aUser').value = '';
 });
+
+$('totpAlt').addEventListener('click', () => { setBackupMode(!backupMode); $('authMsg').textContent = ''; $('aTotp').focus(); });
+
+/* ---------- Two-factor backup codes ---------- */
+
+let backupList = null; // the codes just created, held only until the user says they are saved
+function renderBackup() {
+  $('tfaBackup').hidden = !S.totp;
+  if (!S.totp) { backupList = null; $('backupShow').hidden = true; $('backupCodes').textContent = ''; return; }
+  const n = S.backup;
+  $('backupStatus').textContent = n === undefined ? '' : n === 0 ? 'No backup codes yet. Without them, losing your authenticator means using the recovery key.'
+    : n === 1 ? '1 backup code left. Create new ones soon.' : `${n} backup codes left.`;
+  $('backupNew').textContent = n ? 'Replace backup codes' : 'Create backup codes';
+}
+async function loadAccountInfo() {
+  if (!S.encKey) return;
+  try {
+    const r = await authed(() => api('account'));
+    if (!S.encKey) return;
+    S.backup = r.backup;
+    renderBackup();
+  } catch { /* offline: the count simply stays as it was */ }
+}
+$('backupNew').addEventListener('click', () => withButton($('backupNew'), $('backupMsg'), async () => {
+  const { keys } = await confirmMaster($('tfaPass').value);
+  const r = await authed(() => api('totp_backup', { auth: keys.auth }));
+  backupList = r.codes;
+  S.backup = r.codes.length;
+  $('tfaPass').value = '';
+  $('backupCodes').textContent = r.codes.join('\n');
+  $('backupShow').hidden = false;
+  renderBackup();
+  return 'New backup codes created. Any earlier ones no longer work.';
+}));
+$('backupCopy').addEventListener('click', () => { if (backupList) copy(backupList.join('\n'), 'Backup codes copied'); });
+$('backupSave').addEventListener('click', () => {
+  if (!backupList) return;
+  const text = `Vault two-factor backup codes for ${S.username}\nCreated ${new Date().toISOString().slice(0, 10)}. Each code works once.\n\n${backupList.join('\n')}\n`;
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
+  a.download = 'vault-backup-codes.txt';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  toast('Backup codes downloaded');
+});
+$('backupHide').addEventListener('click', () => { backupList = null; $('backupCodes').textContent = ''; $('backupShow').hidden = true; $('backupMsg').textContent = ''; });
 
 /* ---------- Devices ---------- */
 

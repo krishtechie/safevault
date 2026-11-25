@@ -25,10 +25,13 @@ return [
     // Set to false to switch that off, so addresses are never sent to anyone.
     // 'geo_url' => 'https://free.freeipapi.com/api/v1/json/{ip}',
 
-    // Optional. Email alerts, sent for every sign-in, every failed attempt (wrong master password, PIN or
-    // authenticator code), new devices, and every security change. Leave out to send no email.
+    // Optional. Email alerts. Leave out to send no email. By default they cover what matters: a new device,
+    // every security change, a blocked sign-in, a backup code being used, and wrong attempts from a device the
+    // account has never seen. Everyday sign-ins and typos on your own devices are left out.
     // The address stays in this file on the server and never reaches GitHub.
     // 'alert_email' => 'you@example.com',
+    // Optional. 'all' sends an email for every sign-in and every wrong attempt as well.
+    // 'alert_level' => 'all',
     // Optional. Events to leave out of the emails, by their log name. For example, to skip ordinary sign-ins:
     // 'alert_skip' => ['login_ok'],
     // Optional. Adds an "Open Vault" button to the emails. Must be the https address of your own vault.
