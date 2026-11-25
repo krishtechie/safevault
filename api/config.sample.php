@@ -29,6 +29,11 @@ return [
     // 'alert_email' => 'you@example.com',
     // Optional. Events to leave out of the emails, by their log name. For example, to skip ordinary sign-ins:
     // 'alert_skip' => ['login_ok'],
+    // Optional. Adds an "Open Vault" button to the emails. Must be the https address of your own vault.
+    // The address is printed under the button so it can be checked before signing in.
+    // 'alert_link' => 'https://vault.example.com',
+    // Optional. Time zone for the time shown in the emails. Defaults to UTC.
+    // 'alert_tz' => 'America/Toronto',
     // Optional sender address. Defaults to vault@ your site's domain.
     // 'alert_from' => 'vault@example.com',
 ];

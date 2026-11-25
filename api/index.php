@@ -238,6 +238,58 @@ const ALERT_EVENTS = [
     'totp_off'       => 'Two-factor sign-in was turned off',
     'history_restore' => 'Your vault was restored to an earlier version',
 ];
+// Which colour the notice carries: green for a normal sign-in, red for a failed or refused attempt, amber for a change.
+const ALERT_TONES = [
+    'login_ok' => 'ok', 'device_new' => 'new',
+    'login_fail' => 'fail', 'pin_fail' => 'fail', 'totp_fail' => 'fail', 'recover_fail' => 'fail', 'recover_blocked' => 'fail',
+    'login_blocked' => 'fail', 'pin_locked' => 'fail', 'device_refused' => 'fail',
+];
+// "Chrome on macOS" from a browser's user agent line.
+function ua_label(string $ua): string {
+    $os = 'an unknown system';
+    foreach (['iPhone' => 'iPhone', 'iPad' => 'iPad', 'Android' => 'Android', 'Mac OS X' => 'macOS', 'Windows' => 'Windows', 'CrOS' => 'ChromeOS', 'Linux' => 'Linux'] as $needle => $name) {
+        if (strpos($ua, $needle) !== false) { $os = $name; break; }
+    }
+    $br = 'Unknown browser';
+    foreach (['Edg' => 'Edge', 'OPR/' => 'Opera', 'FxiOS' => 'Firefox', 'Firefox/' => 'Firefox', 'CriOS' => 'Chrome', 'Chrome/' => 'Chrome', 'Safari/' => 'Safari'] as $needle => $name) {
+        if (strpos($ua, $needle) !== false) { $br = $name; break; }
+    }
+    return "$br on $os";
+}
+// The notice as a small card. Tables and inline styles only, because that is what mail apps render reliably.
+// No links, no images, no remote content. Every value is escaped.
+function alert_html(string $title, string $tone, array $rows, string $foot, ?string $link = null): string {
+    $e = fn(string $v) => htmlspecialchars($v, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+    [$colour, $label] = ['ok' => ['#34c759', 'Sign-in'], 'fail' => ['#ff3b30', 'Needs your attention'], 'new' => ['#ff9500', 'New device'], 'change' => ['#ff9500', 'Security change']][$tone];
+    $font = "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;";
+    $out = "<!doctype html>\r\n<html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+        . "<meta name=\"color-scheme\" content=\"light dark\"><title>" . $e($title) . "</title></head>\r\n"
+        . "<body style=\"margin:0;padding:0;background:#f2f2f7;\">\r\n"
+        . "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"background:#f2f2f7;\"><tr><td align=\"center\" style=\"padding:28px 14px;\">\r\n"
+        . "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"max-width:480px;\">\r\n"
+        . "<tr><td style=\"{$font}font-size:15px;font-weight:700;letter-spacing:.2px;color:#1c1c1e;padding:0 6px 14px;\">Vault"
+        . "<span style=\"font-weight:400;color:#8e8e93;\"> &nbsp;Security notice</span></td></tr>\r\n"
+        . "<tr><td style=\"background:#ffffff;border-radius:18px;padding:0;\">\r\n"
+        . "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\">\r\n"
+        . "<tr><td style=\"padding:22px 22px 6px;\"><span style=\"{$font}display:inline-block;font-size:12px;font-weight:600;color:#ffffff;background:{$colour};border-radius:999px;padding:4px 11px;\">" . $e($label) . "</span></td></tr>\r\n"
+        . "<tr><td style=\"{$font}font-size:21px;line-height:27px;font-weight:700;color:#1c1c1e;padding:8px 22px 16px;\">" . $e($title) . "</td></tr>\r\n";
+    foreach ($rows as $k => $v) {
+        $out .= "<tr><td style=\"padding:0 22px;\"><table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"border-top:1px solid #e5e5ea;\"><tr>"
+            . "<td width=\"92\" valign=\"top\" style=\"{$font}font-size:14px;line-height:20px;color:#8e8e93;padding:11px 0;\">" . $e((string)$k) . "</td>"
+            . "<td valign=\"top\" style=\"{$font}font-size:15px;line-height:20px;color:#1c1c1e;padding:11px 0;word-break:break-word;\">" . $e((string)$v) . "</td>"
+            . "</tr></table></td></tr>\r\n";
+    }
+    $button = $link === null ? '' : "<tr><td style=\"padding:16px 0 0;\"><a href=\"" . $e($link) . "\" style=\"{$font}display:inline-block;font-size:15px;font-weight:600;"
+        . "color:#ffffff;background:#007aff;border-radius:999px;padding:11px 22px;text-decoration:none;\">Open Vault</a></td></tr>\r\n"
+        . "<tr><td style=\"{$font}font-size:12px;line-height:18px;color:#8e8e93;padding:10px 0 0;word-break:break-all;\">" . $e($link) . "</td></tr>";
+    $out .= "<tr><td style=\"padding:0 22px 22px;\"><table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"border-top:1px solid #e5e5ea;\"><tr>"
+        . "<td style=\"{$font}font-size:14px;line-height:21px;color:#3a3a3c;padding:14px 0 0;\">" . $e($foot) . "</td></tr>$button</table></td></tr>\r\n"
+        . "</table></td></tr>\r\n"
+        . "<tr><td style=\"{$font}font-size:12px;line-height:18px;color:#8e8e93;padding:14px 6px 0;\">Sent by your own Vault server. " . ($link === null ? 'This notice holds no secrets and no links.' : 'This notice holds no secrets. Its one link is the address shown above; check it before you sign in.') . "</td></tr>\r\n"
+        . "</table></td></tr></table>\r\n</body></html>";
+    return $out;
+}
+
 $alert = function (string $u, string $event) use ($cfg, $ip): void {
     $to = $cfg['alert_email'] ?? null;
     if (!is_string($to) || !filter_var($to, FILTER_VALIDATE_EMAIL) || !isset(ALERT_EVENTS[$event]) || $u === '_server') return;
@@ -249,19 +301,35 @@ $alert = function (string $u, string $event) use ($cfg, $ip): void {
     $host = (string)($_SERVER['HTTP_HOST'] ?? '');
     $domain = preg_match('/^[A-Za-z0-9.-]{1,100}(:\d{1,5})?$/', $host) ? explode(':', $host)[0] : 'vault';
     $ua = substr((string)preg_replace('/[^\x20-\x7E]/', '', (string)($_SERVER['HTTP_USER_AGENT'] ?? '')), 0, 200);
-    // Kept short and plain on purpose: no links and no calls to change anything, which outgoing mail
+    // Kept short on purpose: no links, no images and no calls to change anything, which outgoing mail
     // filters read as phishing. The app's Access log has the detail.
-    $text = ALERT_EVENTS[$event] . ".\r\n\r\n"
-        . "Account: $u\r\nWhen: " . gmdate('D, d M Y H:i') . " UTC\r\nAddress: $ip\r\nBrowser: $ua\r\n\r\n"
-        . "The full record is in the app under Settings, Access log. If this was not you, sign that device out under Settings, Devices.\r\n";
+    $title = ALERT_EVENTS[$event];
+    $tz = 'UTC';
+    if (is_string($cfg['alert_tz'] ?? null) && in_array($cfg['alert_tz'], timezone_identifiers_list(), true)) $tz = $cfg['alert_tz'];
+    $now = new DateTime('now', new DateTimeZone($tz));
+    $when = $now->format('D, j M Y, g:i A') . ' ' . ($tz === 'UTC' ? 'UTC' : $now->format('T'));
+    $rows = ['Account' => $u, 'When' => $when, 'Device' => ua_label($ua), 'Address' => $ip];
+    $foot = 'The full record is in the app under Settings, Access log. If this was not you, sign that device out under Settings, Devices.';
+    $text = $title . ".\r\n\r\n";
+    foreach ($rows as $k => $v) $text .= "$k: $v\r\n";
+    // One optional link, to the vault itself. It comes only from config.php, never from the request, so nobody
+    // can make these emails point somewhere else.
+    $link = null;
+    if (is_string($cfg['alert_link'] ?? null) && preg_match('~^https://[A-Za-z0-9.-]{1,100}(:\d{1,5})?(/[A-Za-z0-9._/-]{0,100})?$~', $cfg['alert_link'])) $link = $cfg['alert_link'];
+    $text .= "\r\n$foot\r\n" . ($link !== null ? "\r\nOpen Vault: $link\r\n" : '');
+    $html = alert_html($title, ALERT_TONES[$event] ?? 'change', $rows, $foot, $link);
+    $boundary = 'vault-' . bin2hex(random_bytes(12));
+    $body = "--$boundary\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: 7bit\r\n\r\n$text\r\n"
+        . "--$boundary\r\nContent-Type: text/html; charset=UTF-8\r\nContent-Transfer-Encoding: 7bit\r\n\r\n$html\r\n"
+        . "--$boundary--\r\n";
     $from = is_string($cfg['alert_from'] ?? null) && filter_var($cfg['alert_from'], FILTER_VALIDATE_EMAIL) ? $cfg['alert_from'] : "vault@$domain";
     // Some hosts add their own X-PHP-Script header in front of these and run the first line into it,
     // which loses that line. A spare first header takes that hit so From always survives.
-    $headers = "X-Vault-Notice: 1\r\nFrom: Vault <$from>\r\nReply-To: $from\r\nContent-Type: text/plain; charset=UTF-8\r\nX-Auto-Response-Suppress: All";
+    $headers = "X-Vault-Notice: 1\r\nFrom: Vault <$from>\r\nReply-To: $from\r\nMIME-Version: 1.0\r\nContent-Type: multipart/alternative; boundary=\"$boundary\"\r\nX-Auto-Response-Suppress: All";
     // Name the sender on the envelope too. Without it the hosting account's own login is used, which
     // receiving mail servers see as a mismatch and tend to file as spam. If the host refuses that, send plainly.
-    $sent = preg_match('/^[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+$/', $from) && @mail($to, 'Vault notice: ' . ALERT_EVENTS[$event], $text, $headers, '-f' . $from);
-    if (!$sent) @mail($to, 'Vault notice: ' . ALERT_EVENTS[$event], $text, $headers);
+    $sent = preg_match('/^[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+$/', $from) && @mail($to, 'Vault notice: ' . ALERT_EVENTS[$event], $body, $headers, '-f' . $from);
+    if (!$sent) @mail($to, 'Vault notice: ' . ALERT_EVENTS[$event], $body, $headers);
 };
 
 $audit = function (string $u, string $event, ?string $typed = null, bool $quiet = false) use ($dataDir, $ip, $alert): void {
