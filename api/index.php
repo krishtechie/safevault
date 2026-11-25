@@ -58,6 +58,10 @@ $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
 $action = (string)($_GET['a'] ?? '');
 $ip     = (string)($_SERVER['REMOTE_ADDR'] ?? 'unknown');
 $https  = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off');
+// Each browser picks a random id for itself and sends it with every request. Only a hash of it is stored.
+// It is what lets the account list its devices and sign one of them out from another.
+$didRaw = base64_decode((string)($_SERVER['HTTP_X_VAULT_DEVICE'] ?? ''), true);
+$dh     = ($didRaw !== false && strlen($didRaw) === 16) ? substr(hash('sha256', $didRaw), 0, 32) : null;
 
 // A custom header cannot be sent cross-site without a CORS preflight, and this API never approves one.
 if (($_SERVER['HTTP_X_VAULT_CLIENT'] ?? '') !== '1') fail(400, 'bad_request');
@@ -181,6 +185,12 @@ function current_user(): ?string {
         $_SESSION = [];
         return null;
     }
+    // A device that was signed out from another device loses its session at once.
+    $d = $_SESSION['d'] ?? null;
+    if (is_string($d) && (!isset($user['devices'][$d]) || !empty($user['devices'][$d]['off']))) {
+        $_SESSION = [];
+        return null;
+    }
     $_SESSION['t'] = time();
     return $u;
 }
@@ -192,7 +202,9 @@ function require_user(): string {
 function sign_in(string $u, int $gen): void {
     start_session();
     session_regenerate_id(true);
+    global $dh;
     $_SESSION = ['u' => $u, 't' => time(), 'g' => $gen];
+    if ($dh !== null) $_SESSION['d'] = $dh;
 }
 // A wrapped key is a small encrypted blob: the vault key locked with a password key or a recovery key.
 function valid_wrap(mixed $w): bool {
@@ -356,6 +368,44 @@ $clearPins = function (string $u) use ($dataDir): void {
 };
 const PIN_TRIES = 3;
 
+/* ---------- Devices ---------- */
+
+const DEVICE_MAX = 20;
+// Records this browser as one of the account's devices (or refreshes when it was last seen).
+// $trustH: hash of the two-factor trust token this device just used, so the two can be removed together later.
+$touchDevice = function (string $u, ?string $trustH = null) use ($updateUser, $dh): void {
+    if ($dh === null) return;
+    $updateUser($u, function (array $user) use ($dh, $trustH) {
+        $now = time();
+        $ua = substr((string)preg_replace('/[^\x20-\x7E]/', '', (string)($_SERVER['HTTP_USER_AGENT'] ?? '')), 0, 200);
+        $devs = is_array($user['devices'] ?? null) ? $user['devices'] : [];
+        $devs[$dh] = ['name' => $devs[$dh]['name'] ?? null, 'ua' => $ua, 'first' => (int)($devs[$dh]['first'] ?? $now), 'last' => $now];
+        // Signed-out devices are remembered for 60 days so they are refused if they come back, then forgotten.
+        $devs = array_filter($devs, fn($d) => empty($d['off']) || (int)$d['off'] > $now - 60 * 86400);
+        $live = array_filter($devs, fn($d) => empty($d['off']));
+        if (count($live) > DEVICE_MAX) {
+            uasort($live, fn($a, $b) => (int)$a['last'] <=> (int)$b['last']);
+            foreach (array_slice(array_keys($live), 0, count($live) - DEVICE_MAX) as $old) unset($devs[$old]);
+        }
+        $user['devices'] = $devs;
+        if ($trustH !== null) {
+            foreach ($user['trusted'] ?? [] as $i => $t) {
+                if (!isset($t['d']) && hash_equals((string)($t['h'] ?? ''), $trustH)) $user['trusted'][$i]['d'] = $dh;
+            }
+        }
+        return $user;
+    });
+};
+// Removes what a device could use to get back in quietly: its PIN record and its two-factor trust.
+$forgetDevice = function (string $u, array $user, string $d) use ($dataDir): array {
+    foreach (glob($dataDir . '/pins/*.json') ?: [] as $f) {
+        $rec = read_json($f);
+        if (($rec['user'] ?? null) === $u && ($rec['d'] ?? null) === $d) { @unlink($f); @unlink($f . '.lock'); }
+    }
+    if (isset($user['trusted'])) $user['trusted'] = array_values(array_filter($user['trusted'], fn($t) => ($t['d'] ?? null) !== $d));
+    return $user;
+};
+
 /* ---------- Two-factor sign-in (authenticator app codes, RFC 6238) ---------- */
 
 function b32_decode(string $in): ?string {
@@ -458,6 +508,7 @@ case 'POST register': {
     @chmod($userFile($u), 0600);
     write_json($vaultFile($u), ['rev' => 1, 'blob' => $body['blob'], 'updated' => time()]);
     sign_in($u, 0);
+    $touchDevice($u);
     $audit($u, 'register');
     out(200, ['rev' => 1]);
 }
@@ -469,6 +520,11 @@ case 'POST login': {
         $auditFail($u, 'login_fail', (bool)$user);
         fail(401, 'bad_credentials');
     }
+    // The right master password from a device that was signed out remotely: refused, and the app on it erases its copy.
+    if ($dh !== null && !empty($user['devices'][$dh]['off'])) {
+        $audit($u, 'device_refused');
+        out(401, ['error' => 'device_revoked']);
+    }
     $newTrust = null;
     if (!empty($user['totp']) && !$isTrusted($user, $body['trust'] ?? null)) {
         // Right master password on a device that has not passed the code check: ask for the code.
@@ -478,12 +534,14 @@ case 'POST login': {
         $key = $totpOpen($user['totp']['secret'] ?? null) ?? fail(500, 'totp_unreadable');
         $newTrust = base64_encode(random_bytes(32));
         $step = null;
-        $updateUser($u, function (array $fresh) use ($key, $body, &$step, $newTrust, $trustHash) {
+        $updateUser($u, function (array $fresh) use ($key, $body, &$step, $newTrust, $trustHash, $dh) {
             $step = totp_match($key, $body['totp'], (int)($fresh['totp']['last'] ?? 0));
             if ($step === null) return $fresh;
             $fresh['totp']['last'] = $step;
             $ua = substr((string)preg_replace('/[^\x20-\x7E]/', '', (string)($_SERVER['HTTP_USER_AGENT'] ?? '')), 0, 200);
-            $fresh['trusted'] = array_slice(array_merge($fresh['trusted'] ?? [], [['h' => $trustHash($newTrust), 'at' => time(), 'ua' => $ua]]), -10);
+            $entry = ['h' => $trustHash($newTrust), 'at' => time(), 'ua' => $ua];
+            if ($dh !== null) $entry['d'] = $dh;
+            $fresh['trusted'] = array_slice(array_merge($fresh['trusted'] ?? [], [$entry]), -10);
             return $fresh;
         });
         if ($step === null) {
@@ -496,6 +554,7 @@ case 'POST login': {
         $audit($u, 'device_trusted');
     }
     sign_in($u, (int)($user['gen'] ?? 0));
+    $touchDevice($u, $trustHash($body['trust'] ?? null));
     // 'auto' marks the app renewing its own session after a Face ID or PIN unlock, with no password typed.
     // It only changes the wording in the log. The same key and the same checks are required either way.
     $audit($u, ($body['auto'] ?? false) === true ? 'login_renew' : 'login_ok');
@@ -536,7 +595,12 @@ case 'POST totp_disable': {
 
 case 'POST logout': {
     $who = current_user();
-    if ($who !== null) $audit($who, 'logout');
+    if ($who !== null) {
+        $audit($who, 'logout');
+        // Signing out removes this device from the account's list, with its PIN record and two-factor trust.
+        $d = $_SESSION['d'] ?? null;
+        if (is_string($d)) $updateUser($who, function (array $user) use ($who, $d, $forgetDevice) { unset($user['devices'][$d]); return $forgetDevice($who, $user, $d); });
+    }
     $_SESSION = [];
     session_destroy();
     out(200, ['ok' => true]);
@@ -584,6 +648,7 @@ case 'POST rekey': {
     });
     $clearPins($u); // PINs on every device stop working until set again
     sign_in($u, $user['gen']);
+    $touchDevice($u);
     $audit($u, 'rekey');
     out(200, ['ok' => true]);
 }
@@ -647,7 +712,10 @@ case 'POST recover_finish': {
         return $user;
     });
     $clearPins($u);
+    // Recovery also clears any remote sign-out, since the recovery key proves ownership.
+    if ($dh !== null) $updateUser($u, function (array $fresh) use ($dh) { unset($fresh['devices'][$dh]['off']); return $fresh; });
     sign_in($u, $user['gen']);
+    $touchDevice($u);
     $audit($u, 'recover_ok');
     if ($hadTotp) $audit($u, 'totp_off');
     $v = read_json($vaultFile($u));
@@ -668,7 +736,7 @@ case 'POST pin_set': {
     if ($mine >= 10) fail(409, 'too_many_devices');
     write_json($file, [
         'user' => $u, 'hash' => password_hash($body['pinAuth'], PASSWORD_DEFAULT), 'ksrv' => $body['ksrv'],
-        'fails' => 0, 'created' => time(),
+        'fails' => 0, 'created' => time(), 'd' => $dh,
     ]);
     $audit($u, 'pin_set');
     out(200, ['ok' => true]);
@@ -678,12 +746,14 @@ case 'POST pin_unlock': {
     // No session needed: the device id is a 128-bit random value known only to that device.
     $file = $pinFile($body['deviceId'] ?? null);
     if (throttle_count("pin-ip:$ip", 900) >= 30) fail(429, 'slow_down');
-    with_lock($file . '.lock', function () use ($file, $body, $ip, $audit) {
+    with_lock($file . '.lock', function () use ($file, $body, $ip, $audit, $dh) {
         $rec = read_json($file);
         if (!$rec) { @unlink($file . '.lock'); fail(404, 'pin_gone'); }
         $ok = b64_len($body['pinAuth'] ?? null) === 32 && password_verify((string)$body['pinAuth'], (string)$rec['hash']);
         if ($ok) {
-            if ((int)$rec['fails'] !== 0) { $rec['fails'] = 0; write_json($file, $rec); }
+            $bind = $dh !== null && empty($rec['d']); // PINs set before devices were tracked get tied to their device here
+            if ($bind) $rec['d'] = $dh;
+            if ((int)$rec['fails'] !== 0 || $bind) { $rec['fails'] = 0; write_json($file, $rec); }
             $audit((string)$rec['user'], 'pin_ok');
             out(200, ['ksrv' => $rec['ksrv']]);
         }
@@ -705,6 +775,61 @@ case 'POST pin_clear': {
     $file = $pinFile($body['deviceId'] ?? null);
     $rec = read_json($file);
     if ($rec && ($rec['user'] ?? null) === $u) { @unlink($file); @unlink($file . '.lock'); $audit($u, 'pin_clear'); }
+    out(200, ['ok' => true]);
+}
+
+case 'GET devices': {
+    // Where the account is signed in. Nothing here is secret: a name, the browser, and two times.
+    $u = require_user();
+    $user = read_json($userFile($u)) ?? fail(404, 'no_account');
+    $withPin = [];
+    foreach (glob($dataDir . '/pins/*.json') ?: [] as $f) {
+        $rec = read_json($f);
+        if (($rec['user'] ?? null) === $u && !empty($rec['d'])) $withPin[$rec['d']] = true;
+    }
+    $list = [];
+    foreach ($user['devices'] ?? [] as $id => $d) {
+        if (!empty($d['off'])) continue;
+        $list[] = [
+            'id' => (string)$id, 'name' => $d['name'] ?? null, 'ua' => (string)($d['ua'] ?? ''), 'first' => (int)($d['first'] ?? 0),
+            'last' => (int)($d['last'] ?? 0), 'current' => $id === ($_SESSION['d'] ?? null), 'pin' => isset($withPin[$id]),
+        ];
+    }
+    usort($list, fn($a, $b) => [$b['current'], $b['last']] <=> [$a['current'], $a['last']]);
+    out(200, ['devices' => $list]);
+}
+
+case 'POST device_name': {
+    $u = require_user();
+    $id = $body['id'] ?? null;
+    $name = is_string($body['name'] ?? null) ? trim((string)preg_replace('/[\x00-\x1F\x7F<>]|\xC2[\x80-\x9F]/', '', $body['name'])) : '';
+    if (!is_string($id) || !preg_match('/^[a-f0-9]{32}$/', $id)) fail(400, 'bad_device');
+    if ($name === '' || !mb_check_encoding($name, 'UTF-8') || mb_strlen($name, 'UTF-8') > 40) fail(400, 'bad_device_name');
+    $found = false;
+    $updateUser($u, function (array $user) use ($id, $name, &$found) {
+        if (isset($user['devices'][$id]) && empty($user['devices'][$id]['off'])) { $user['devices'][$id]['name'] = $name; $found = true; }
+        return $user;
+    });
+    if (!$found) fail(404, 'no_device');
+    out(200, ['ok' => true, 'name' => $name]);
+}
+
+case 'POST device_off': {
+    // Sign another device out. Its session ends at once, its PIN and two-factor trust are removed,
+    // and the next time it connects it is refused and erases its own copy of the vault.
+    $u = require_user();
+    $id = $body['id'] ?? null;
+    if (!is_string($id) || !preg_match('/^[a-f0-9]{32}$/', $id)) fail(400, 'bad_device');
+    if ($id === ($_SESSION['d'] ?? null)) fail(400, 'is_this_device');
+    $found = false;
+    $updateUser($u, function (array $user) use ($u, $id, &$found, $forgetDevice) {
+        if (!isset($user['devices'][$id]) || !empty($user['devices'][$id]['off'])) return $user;
+        $found = true;
+        $user['devices'][$id]['off'] = time();
+        return $forgetDevice($u, $user, $id);
+    });
+    if (!$found) fail(404, 'no_device');
+    $audit($u, 'device_off');
     out(200, ['ok' => true]);
 }
 

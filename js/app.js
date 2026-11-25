@@ -5,6 +5,24 @@ core.setArgon2(globalThis.hashwasm.argon2id);
 const $ = (id) => document.getElementById(id);
 const API = 'api/index.php';
 
+// The page and this script are published together. Right after an update a browser can hold one of them from
+// before; the missing parts would then stop the app from starting. When they do not match, fetch fresh copies
+// and reload, once.
+const BUILD = '15';
+{
+  const page = document.querySelector('meta[name="vault-build"]');
+  let tried = false;
+  try {
+    if (page && page.content === BUILD) sessionStorage.removeItem('rebuilt');
+    else { tried = sessionStorage.getItem('rebuilt') === BUILD; sessionStorage.setItem('rebuilt', BUILD); }
+  } catch { tried = true; /* storage blocked: do not risk a reload loop */ }
+  if ((!page || page.content !== BUILD) && !tried) {
+    await Promise.all(['./', 'js/app.js', 'js/core.js', 'style.css'].map((u) => fetch(u, { cache: 'reload' }).catch(() => {})));
+    location.reload();
+    await new Promise(() => {}); // nothing below runs; the reload takes over
+  }
+}
+
 // Everything sensitive lives only in this object, in memory, while unlocked.
 // encKey is the vault key (non-extractable). wrap is that key locked with the master password key.
 const S = { username: null, encKey: null, auth: null, salt: null, kdf: null, wrap: null, hasRecovery: false, totp: false, hash: '', rollback: null, items: [], rev: 0, dirty: false, changes: 0 };
@@ -33,17 +51,42 @@ const store = {
   del(k) { return this.run('readwrite', (s) => s.delete(k)); },
 };
 
+// A random id this browser chose for itself, so the account can list its devices and sign one out from another.
+let did = null;
+async function newDid() {
+  did = core.b64.enc(core.randomBytes(16));
+  await store.set('device', { id: did }).catch(() => {});
+}
+const didReady = (async () => {
+  try { const d = await store.get('device'); if (d && typeof d.id === 'string') { did = d.id; return; } } catch { /* storage unavailable */ }
+  await newDid();
+})();
+
 async function api(action, body, query = '') {
-  const opt = { method: body ? 'POST' : 'GET', headers: { 'X-Vault-Client': '1' }, credentials: 'same-origin', cache: 'no-store' };
+  await didReady;
+  const opt = { method: body ? 'POST' : 'GET', headers: { 'X-Vault-Client': '1', 'X-Vault-Device': did }, credentials: 'same-origin', cache: 'no-store' };
   if (body) { opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
   let res;
   try { res = await fetch(`${API}?a=${action}${query}`, opt); }
   catch { const e = new Error('offline'); e.offline = true; throw e; }
   let data = {};
   try { data = await res.json(); } catch { /* non-JSON error page */ }
+  if (data.error === 'device_revoked') await wipeDevice(ERRORS.device_revoked);
   if (!res.ok && res.status !== 409) { const e = new Error(data.error || 'http_' + res.status); e.status = res.status; e.data = data; throw e; }
   data.status = res.status;
   return data;
+}
+
+// This device was signed out from another one: erase everything kept here and go back to the sign-in screen.
+async function wipeDevice(message) {
+  quick = null;
+  trust = null;
+  recents.clear();
+  breach.clear();
+  for (const k of ['quick', 'trust', 'state', 'unlock']) await store.del(k).catch(() => {});
+  await newDid();
+  if (S.encKey) lock(message);
+  else { setAuthMode('unlock'); $('authMsg').textContent = message; }
 }
 
 let toastTimer;
@@ -76,6 +119,10 @@ async function copy(text, label = 'Copied') {
 
 const ERRORS = {
   bad_credentials: 'Wrong username or master password.',
+  device_revoked: 'This device was signed out from another device, and its copy of the vault was erased. Sign in again with your master password to use it here.',
+  bad_tags: 'A tag can be up to 24 characters.',
+  too_many_tags: 'Up to 6 tags per entry.',
+  bad_device_name: 'Name: 1 to 40 characters.',
   newer_format: 'Your vault was saved by a newer version of the app. Reload this page to update, then unlock again.',
   bad_invite: 'That invite code is not valid.',
   username_taken: 'That username is already taken.',
@@ -247,6 +294,7 @@ async function unlock(username, password) {
         totp = r.totp;
       } catch (e) {
         if (e.message === 'bad_credentials') throw new Error('changed_elsewhere');
+        if (e.message === 'device_revoked') throw e; // signed out remotely: the local copy is already erased
         if (e.message === 'totp_required' || e.message === 'bad_totp') throw e; // the server wants the authenticator code
         // offline or busy: carry on with the device copy
       }
@@ -502,6 +550,12 @@ function lock(message = '') {
   for (const d of document.querySelectorAll('details.fold')) d.open = false; // settings sections fold shut again
   $('trashList').replaceChildren();
   $('trashOpen').hidden = true;
+  activeTag = '';
+  $('tagBar').replaceChildren();
+  $('tagBar').hidden = true;
+  $('tagPick').replaceChildren();
+  $('devList').replaceChildren();
+  $('devMsg').textContent = '';
   $('healthBadge').hidden = true;
   $('healthSum').textContent = '';
   $('toast').classList.remove('show', 'has-action');
@@ -512,7 +566,7 @@ function lock(message = '') {
   try { sessionStorage.removeItem('vaultOpen'); } catch { /* storage blocked */ }
   store.del('unlock').catch(() => {});
   if ($('itemDlg').open) $('itemDlg').close();
-  for (const id of ['fTitle', 'fUser', 'fPass', 'fUrl', 'fNotes', 'fTotp', 'search', 'importPass', 'cpCur', 'cpNew', 'cpNew2', 'recPass', 'qPass', 'qPin', 'qPin2', 'tfaPass', 'tfaCode']) $(id).value = '';
+  for (const id of ['fTitle', 'fUser', 'fPass', 'fUrl', 'fNotes', 'fTotp', 'fTags', 'search', 'importPass', 'cpCur', 'cpNew', 'cpNew2', 'recPass', 'qPass', 'qPin', 'qPin2', 'tfaPass', 'tfaCode']) $(id).value = '';
   $('tfaSetup').hidden = true;
   tfaPending = null;
   for (const id of ['healthMsg', 'healthNote', 'fAge', 'cpMsg', 'recMsg', 'recCode', 'pinMsg', 'bioMsg', 'csvMsg', 'tfaMsg', 'tfaKey']) $(id).textContent = '';
@@ -763,7 +817,7 @@ function showView(name) {
   if (name === 'vault' && wideScreen() && !$('itemDlg').open) setTimeout(() => $('search').focus(), 0);
   for (const t of document.querySelectorAll('.tab')) t.classList.toggle('active', t.dataset.view === name);
 }
-for (const t of document.querySelectorAll('.tab')) t.addEventListener('click', () => { showView(t.dataset.view); if (t.dataset.view === 'settings') loadLog(); if (t.dataset.view === 'health') refreshHealth(); });
+for (const t of document.querySelectorAll('.tab')) t.addEventListener('click', () => { showView(t.dataset.view); if (t.dataset.view === 'settings') { loadLog(); loadDevices(); } if (t.dataset.view === 'health') refreshHealth(); });
 
 const live = () => S.items.filter((it) => !it.deleted && !it.trashedAt);
 const trashed = () => S.items.filter((it) => !it.deleted && it.trashedAt).sort((a, b) => b.trashedAt - a.trashedAt);
@@ -835,10 +889,41 @@ function entryRow(it) {
   return li;
 }
 
+// Tag chips above the list. Tapping one shows only the entries that carry it.
+let activeTag = '';
+function tagChip(label, count, pressed, onTap) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'chip';
+  b.setAttribute('aria-pressed', String(pressed));
+  b.textContent = label;
+  if (count !== null) {
+    const n = document.createElement('span');
+    n.className = 'n';
+    n.textContent = String(count);
+    b.append(n);
+  }
+  b.addEventListener('click', onTap);
+  return b;
+}
+function renderTags() {
+  const tags = core.allTags(S.items);
+  if (activeTag && !tags.some((t) => t.tag.toLowerCase() === activeTag.toLowerCase())) activeTag = '';
+  $('tagBar').hidden = tags.length === 0;
+  const at = $('tagBar').scrollLeft; // keep the row where the user scrolled it
+  $('tagBar').replaceChildren(
+    tagChip('All', live().length, !activeTag, () => { activeTag = ''; renderList(); }),
+    ...tags.map((t) => tagChip(t.tag, t.count, activeTag.toLowerCase() === t.tag.toLowerCase(), () => { activeTag = activeTag.toLowerCase() === t.tag.toLowerCase() ? '' : t.tag; renderList(); })),
+  );
+  $('tagBar').scrollLeft = at;
+}
+
 function renderList() {
   if (!S.encKey) return;
   const q = $('search').value.trim().toLowerCase();
-  const rows = live().filter((it) => !q || [it.title, it.username, it.url].some((f) => (f || '').toLowerCase().includes(q)));
+  renderTags();
+  const rows = live().filter((it) => (!activeTag || core.hasTag(it, activeTag))
+    && (!q || [it.title, it.username, it.url, ...(it.tags || [])].some((f) => (f || '').toLowerCase().includes(q))));
   // While searching, show one flat list of matches. Otherwise group: favourites, recently used, the rest.
   const groups = q
     ? [{ label: '', items: rows.sort((a, b) => (a.title || '').localeCompare(b.title || '', undefined, { sensitivity: 'base' })) }].filter((g) => g.items.length)
@@ -877,8 +962,8 @@ addEventListener('keydown', (ev) => {
 
 /* ---------- Entry editor ---------- */
 
-const FIELD_IDS = ['fTitle', 'fUser', 'fPass', 'fUrl', 'fNotes', 'fTotp'];
-const FIELD_OF = { need_title: 'fTitle', bad_title: 'fTitle', bad_username_field: 'fUser', need_password: 'fPass', bad_password: 'fPass', password_spaces: 'fPass', bad_url: 'fUrl', bad_notes: 'fNotes', bad_totp_secret: 'fTotp', totp_unsupported: 'fTotp' };
+const FIELD_IDS = ['fTitle', 'fUser', 'fPass', 'fUrl', 'fNotes', 'fTotp', 'fTags'];
+const FIELD_OF = { need_title: 'fTitle', bad_title: 'fTitle', bad_username_field: 'fUser', need_password: 'fPass', bad_password: 'fPass', password_spaces: 'fPass', bad_url: 'fUrl', bad_notes: 'fNotes', bad_totp_secret: 'fTotp', totp_unsupported: 'fTotp', bad_tags: 'fTags', too_many_tags: 'fTags' };
 let editingId = null;
 let fixing = false;
 
@@ -904,6 +989,8 @@ function openItem(id, why = '') {
   $('fNotes').value = it?.notes || '';
   $('fTotp').value = it?.totp || '';
   $('fFav').checked = !!it?.fav;
+  $('fTags').value = (it?.tags || []).join(', ');
+  renderTagPick();
   refreshGo();
   startCode();
   $('fPass').type = 'password';
@@ -917,7 +1004,25 @@ function openItem(id, why = '') {
   if (why) $('fixBox').scrollIntoView({ block: 'start' });
 }
 
-$('addBtn').addEventListener('click', () => openItem(null));
+// Existing tags shown under the Tags field: tap to add one to the entry or take it off.
+function renderTagPick() {
+  const tags = core.allTags(S.items);
+  const mine = core.normalizeTags($('fTags').value);
+  $('tagPick').hidden = tags.length === 0;
+  $('tagPick').replaceChildren(...tags.map((t) => {
+    const on = mine.some((m) => m.toLowerCase() === t.tag.toLowerCase());
+    return tagChip(t.tag, null, on, () => {
+      const now = core.normalizeTags($('fTags').value);
+      const next = on ? now.filter((m) => m.toLowerCase() !== t.tag.toLowerCase()) : [...now, t.tag];
+      $('fTags').value = next.join(', ');
+      $('fTags').classList.remove('bad');
+      renderTagPick();
+    });
+  }));
+}
+$('fTags').addEventListener('input', renderTagPick);
+
+$('addBtn').addEventListener('click', () => { openItem(null); if (activeTag) { $('fTags').value = activeTag; renderTagPick(); } });
 $('fCancel').addEventListener('click', () => $('itemDlg').close());
 $('fUserCopy').addEventListener('click', () => { recents.touch(editingId); copy($('fUser').value, 'Username copied'); });
 $('fPassCopy').addEventListener('click', () => { recents.touch(editingId); copy($('fPass').value, 'Password copied'); });
@@ -971,7 +1076,7 @@ $('itemForm').addEventListener('submit', async (ev) => {
   try {
     clean = core.validateEntry({
       title: $('fTitle').value, username: $('fUser').value, password: $('fPass').value, url: $('fUrl').value, notes: $('fNotes').value,
-      totp: $('fTotp').value,
+      totp: $('fTotp').value, tags: $('fTags').value,
     });
   } catch (e) {
     $('itemMsg').textContent = explain(e);
@@ -984,7 +1089,7 @@ $('itemForm').addEventListener('submit', async (ev) => {
   if ($('fFav').checked) data.fav = true;
   if (editingId) {
     const i = S.items.findIndex((x) => x.id === editingId);
-    const { fav, totp, ...kept } = S.items[i]; // optional fields come only from the form
+    const { fav, totp, tags, ...kept } = S.items[i]; // optional fields come only from the form
     // The password's age restarts only when the password itself changes.
     if (kept.password !== data.password) data.pwAt = data.updatedAt;
     else breach.carry(editingId, kept.updatedAt, data.updatedAt);
@@ -1634,9 +1739,110 @@ $('signOutBtn').addEventListener('click', async () => {
   await store.del('quick').catch(() => {});
   await store.del('trust').catch(() => {});
   await store.del('state');
+  await newDid(); // the server has forgotten this device; it starts afresh next time
   lock();
   $('aUser').value = '';
 });
+
+/* ---------- Devices ---------- */
+
+function since(sec) {
+  const min = Math.floor((Date.now() - sec * 1000) / 60000);
+  if (min < 2) return 'just now';
+  if (min < 60) return `${min} min ago`;
+  if (min < 1440) return min < 120 ? '1 hour ago' : `${Math.floor(min / 60)} hours ago`;
+  return ago(sec * 1000);
+}
+let devRenaming = null;
+function renderDevices(list) {
+  const frag = document.createDocumentFragment();
+  for (const d of list) {
+    const kind = core.describeDevice(d.ua);
+    const row = document.createElement('div');
+    row.className = 'dev-row';
+    const top = document.createElement('div');
+    top.className = 'dev-top';
+    const name = document.createElement('strong');
+    name.textContent = d.name || kind;
+    top.append(name);
+    if (d.current) {
+      const here = document.createElement('span');
+      here.className = 'badge here';
+      here.textContent = 'This device';
+      top.append(here);
+    }
+    const sub = document.createElement('p');
+    sub.className = 'muted';
+    sub.textContent = [d.name ? kind : '', 'Active ' + since(d.last), d.pin ? 'PIN on' : ''].filter(Boolean).join(' · ');
+    const acts = document.createElement('div');
+    acts.className = 'dev-acts';
+    const button = (label, cls, aria) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'btn small' + cls;
+      b.textContent = label;
+      b.setAttribute('aria-label', aria);
+      return b;
+    };
+    if (devRenaming === d.id) {
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.maxLength = 40;
+      input.value = d.name || kind;
+      input.autocomplete = 'off';
+      input.setAttribute('aria-label', 'Device name');
+      const save = button('Save', ' primary', 'Save device name');
+      const cancel = button('Cancel', '', 'Cancel renaming');
+      const done = async () => {
+        try {
+          await authed(() => api('device_name', { id: d.id, name: input.value }));
+          devRenaming = null;
+          await loadDevices();
+        } catch (e) { $('devMsg').textContent = e.offline ? 'Renaming needs internet.' : explain(e); }
+      };
+      save.addEventListener('click', done);
+      input.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); done(); } });
+      cancel.addEventListener('click', () => { devRenaming = null; renderDevices(list); });
+      acts.append(input, save, cancel);
+      setTimeout(() => input.select(), 0);
+    } else {
+      const ren = button('Rename', '', 'Rename ' + (d.name || kind));
+      ren.addEventListener('click', () => { devRenaming = d.id; $('devMsg').textContent = ''; renderDevices(list); });
+      acts.append(ren);
+      if (!d.current) {
+        const off = button('Sign out', ' danger', 'Sign out ' + (d.name || kind));
+        armed(off, 'Sign out', async () => {
+          try {
+            await authed(() => api('device_off', { id: d.id }));
+            toast('Signed out. It erases its copy when it next connects');
+            await loadDevices();
+          } catch (e) { $('devMsg').textContent = e.offline ? 'Signing a device out needs internet.' : 'Could not sign that device out. Try again.'; }
+        });
+        acts.append(off);
+      }
+    }
+    row.append(top, sub, acts);
+    frag.append(row);
+  }
+  $('devList').replaceChildren(frag);
+}
+async function loadDevices() {
+  if (!S.encKey) return;
+  try {
+    let r = await authed(() => api('devices'));
+    // A session that began before devices were tracked is not on the list yet: renew it once so it is.
+    if (S.encKey && !(r.devices || []).some((d) => d.current)) {
+      await relogin();
+      r = await api('devices');
+    }
+    if (!S.encKey) return;
+    $('devMsg').textContent = '';
+    renderDevices(r.devices || []);
+  } catch (e) {
+    if (S.encKey) $('devMsg').textContent = e.offline ? 'The device list needs internet.' : 'Could not load the device list.';
+  }
+}
+$('devFold').addEventListener('toggle', () => { if ($('devFold').open) loadDevices(); });
 
 /* ---------- Startup ---------- */
 

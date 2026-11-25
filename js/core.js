@@ -186,7 +186,7 @@ const aad = (username) => te.encode('vault-v1|' + username);
 
 // Raised whenever entries gain a field that an older copy of the app would silently drop.
 // A device running older code then refuses to open (and overwrite) a newer vault and asks for a reload.
-export const VAULT_FORMAT = 2;
+export const VAULT_FORMAT = 3;
 
 export async function encryptVault(encKey, username, items) {
   const iv = randomBytes(12); // fresh nonce on every save
@@ -293,6 +293,50 @@ export function normalizeUrl(input) {
 }
 
 // Checks what was typed into the entry form. Throws an error code naming the first problem.
+/* ---------- Tags ---------- */
+
+export const TAG_MAX = 6;     // per entry
+export const TAG_LEN = 24;    // characters per tag
+// Accepts what was typed ("Work, Banking") or a stored list. Returns a clean list: trimmed, single spaces,
+// no repeats (ignoring upper and lower case). strict = true refuses what does not fit instead of trimming it.
+export function normalizeTags(input, strict = false) {
+  const parts = Array.isArray(input) ? input : String(input ?? '').split(/[,;\n]/);
+  const out = [];
+  const seen = new Set();
+  for (const raw of parts) {
+    if (typeof raw !== 'string') continue;
+    let tag = raw.replace(new RegExp('[' + HIDDEN_SRC + '<>]', 'g'), ' ').replace(/\s+/g, ' ').trim();
+    if (!tag) continue;
+    if ([...tag].length > TAG_LEN) {
+      if (strict) throw new Error('bad_tags');
+      tag = [...tag].slice(0, TAG_LEN).join('').trim();
+    }
+    const key = tag.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(tag);
+  }
+  if (out.length > TAG_MAX) {
+    if (strict) throw new Error('too_many_tags');
+    out.length = TAG_MAX;
+  }
+  return out;
+}
+// Every tag in use on live entries with how many entries carry it, A to Z. Spelling follows the first entry seen.
+export function allTags(items) {
+  const map = new Map();
+  for (const it of items) {
+    if (it.deleted || it.trashedAt) continue;
+    for (const tag of it.tags || []) {
+      const key = tag.toLowerCase();
+      if (!map.has(key)) map.set(key, { tag, count: 0 });
+      map.get(key).count++;
+    }
+  }
+  return [...map.values()].sort((a, b) => a.tag.localeCompare(b.tag, undefined, { sensitivity: 'base' }));
+}
+export const hasTag = (it, tag) => (it.tags || []).some((t) => t.toLowerCase() === String(tag).toLowerCase());
+
 export function validateEntry(d) {
   const title = String(d.title ?? '').trim();
   const username = String(d.username ?? '').trim();
@@ -308,6 +352,8 @@ export function validateEntry(d) {
   const out = { title, username, password, url: normalizeUrl(d.url), notes };
   const totp = normalizeTotp(d.totp);
   if (totp) out.totp = totp;
+  const tags = normalizeTags(d.tags, true);
+  if (tags.length) out.tags = tags;
   return out;
 }
 
@@ -340,6 +386,8 @@ export function sanitizeItems(items) {
     if (time(it.trashedAt)) clean.trashedAt = time(it.trashedAt); // in Recently deleted since this time
     if (time(it.pwAt)) clean.pwAt = time(it.pwAt);                // when the password itself was last set
     try { const key = normalizeTotp(it.totp); if (key) clean.totp = key; } catch { /* drop an unusable key */ }
+    const tags = normalizeTags(Array.isArray(it.tags) ? it.tags : []);
+    if (tags.length) clean.tags = tags;
     out.push(clean);
   }
   return out;
@@ -506,6 +554,8 @@ export const LOG_EVENTS = Object.freeze({
   totp_off: ['Two-factor sign-in turned off', 'change'],
   totp_fail: ['Wrong authenticator code after a correct master password', 'fail'],
   device_trusted: ['New device approved with an authenticator code', 'change'],
+  device_off: ['A device was signed out from another device', 'change'],
+  device_refused: ['A signed-out device tried to connect and was refused', 'fail'],
   login_blocked: ['Sign-in blocked for 15 minutes after 5 wrong tries', 'fail'],
   recover_blocked: ['Recovery blocked for 15 minutes after 5 wrong tries', 'fail'],
   // The lines below reach only the server owner: attempts on names that do not exist or on other accounts.
@@ -568,6 +618,7 @@ const CSV_COLUMNS = {
   password: ['password', 'login_password', 'pass'],
   notes: ['note', 'notes', 'extra', 'comment', 'comments'],
   totp: ['login_totp', 'otpauth', 'totp', 'otp', 'one-time password'],
+  tags: ['folder', 'grouping', 'group', 'tags', 'tag', 'category'],
 };
 
 // Turns an export file into entries. existing = entries already in the vault, used to skip duplicates.
@@ -598,7 +649,7 @@ export function importCsv(text, existing = []) {
     if (!title) title = get('username').trim() || 'Imported entry';
     // sanitizeItems applies the same cleaning as every other data source.
     const [clean] = sanitizeItems([{
-      id: newId(), title, username: get('username'), password, url, notes: get('notes'), totp: get('totp'), createdAt: now, updatedAt: now,
+      id: newId(), title, username: get('username'), password, url, notes: get('notes'), totp: get('totp'), tags: normalizeTags(get('tags').replace(/[\\/]/g, ',')), createdAt: now, updatedAt: now,
     }]);
     if (!clean.password) { skipped.push({ line: n + 2, reason: 'no usable password' }); return; }
     const key = keyOf(clean);

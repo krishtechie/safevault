@@ -444,3 +444,35 @@ test('vault format: a copy written by a newer app version is refused instead of 
   await assert.rejects(core.decryptVault(k2, 'u', await seal({ fmt: core.VAULT_FORMAT + 1, items: [] })), /newer_format/);
   assert.deepEqual(await core.decryptVault(k2, 'u', await seal({ items: [{ id: 'o', title: 'Old format', updatedAt: 1 }] })), core.sanitizeItems([{ id: 'o', title: 'Old format', updatedAt: 1 }]));
 });
+
+test('tags: cleaned, limited, matched without regard to case, and kept through encrypt and import', async () => {
+  assert.deepEqual(core.normalizeTags(' Work ,banking;  work , Side   project\n​Hidden<b> '), ['Work', 'banking', 'Side project', 'Hidden b']);
+  assert.deepEqual(core.normalizeTags(''), []);
+  assert.deepEqual(core.normalizeTags(undefined), []);
+  assert.deepEqual(core.normalizeTags(['ok', 7, null, { a: 1 }, 'OK', 'two']), ['ok', 'two']);
+  assert.equal(core.normalizeTags('x'.repeat(40))[0].length, core.TAG_LEN);
+  assert.throws(() => core.normalizeTags('x'.repeat(25), true), /bad_tags/);
+  assert.equal(core.normalizeTags('a,b,c,d,e,f,g,h').length, core.TAG_MAX);
+  assert.throws(() => core.normalizeTags('a,b,c,d,e,f,g', true), /too_many_tags/);
+  const base = { title: 'T', username: '', password: 'pw-123456', url: '', notes: '' };
+  assert.deepEqual(core.validateEntry({ ...base, tags: 'Work, Banking' }).tags, ['Work', 'Banking']);
+  assert.ok(!('tags' in core.validateEntry(base)));
+  assert.throws(() => core.validateEntry({ ...base, tags: 'y'.repeat(30) }), /bad_tags/);
+  const items = core.sanitizeItems([
+    { id: '1', title: 'A', password: 'p', updatedAt: 1, tags: ['Work', '<img src=x>', 'work', 5] },
+    { id: '2', title: 'B', password: 'p2', updatedAt: 1, tags: 'not a list' },
+    { id: '3', title: 'C', password: 'p3', updatedAt: 1, tags: ['WORK', 'Bank'] },
+    { id: '4', title: 'D', password: 'p4', updatedAt: 1, tags: ['Bank'], trashedAt: 9 },
+  ]);
+  assert.deepEqual(items[0].tags, ['Work', 'img src=x']);
+  assert.ok(!('tags' in items[1]));
+  assert.deepEqual(core.allTags(items), [{ tag: 'Bank', count: 1 }, { tag: 'img src=x', count: 1 }, { tag: 'Work', count: 2 }]);
+  assert.ok(core.hasTag(items[2], 'work') && !core.hasTag(items[1], 'work'));
+  const key = await core.importVaultKey(core.randomBytes(32));
+  assert.deepEqual((await core.decryptVault(key, 'u', await core.encryptVault(key, 'u', items)))[2].tags, ['WORK', 'Bank']);
+  const bw = 'folder,favorite,type,name,notes,fields,reprompt,login_uri,login_username,login_password,login_totp\nWork/Clients,,login,Acme,,,0,https://acme.test,me,pw-acme-1,\n,,login,Plain,,,0,,me,pw-plain-1,\n';
+  const got = core.importCsv(bw, []).items;
+  assert.deepEqual(got[0].tags, ['Work', 'Clients']);
+  assert.ok(!('tags' in got[1]));
+  assert.ok(!('tags' in core.importCsv('name,url,username,password,note\nG,https://g.test,me,pw-g-12345,\n', []).items[0])); // Google export has no folders
+});

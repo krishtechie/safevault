@@ -2,7 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="vault-build" content="15">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://api.pwnedpasswords.com; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow">
@@ -98,6 +99,7 @@
         <input id="search" type="search" placeholder="Search passwords" autocomplete="off">
         <button id="addBtn" class="btn primary" type="button">Add</button>
       </div>
+      <div id="tagBar" class="chips" role="group" aria-label="Filter by tag" hidden></div>
       <div id="list" class="lists"></div>
       <p id="empty" class="muted center" hidden>Nothing here yet. Tap Add to save your first password.</p>
       <button id="trashOpen" class="link trash-link" type="button" hidden>Recently deleted</button>
@@ -214,6 +216,12 @@
           <button id="tfaOn" class="btn primary" type="button">Turn on</button>
         </div>
         <p id="tfaMsg" class="msg"></p>
+      </details>
+      <details id="devFold" class="card fold" name="settings">
+        <summary><h3>Devices</h3><span class="fold-sub">Where your account is signed in</span></summary>
+        <p class="muted">Every browser and phone signed in to your account. Signing one out ends its session, turns off its PIN, and makes it erase its copy of the vault the next time it connects. If a device was lost or stolen, change your master password as well.</p>
+        <div id="devList" class="log"></div>
+        <p id="devMsg" class="muted"></p>
       </details>
       <details class="card fold" name="settings">
         <summary><h3>Master password</h3><span class="fold-sub">Change it</span></summary>
@@ -358,6 +366,10 @@
       </div>
       <button id="codeCopy" class="btn small" type="button">Copy code</button>
     </div>
+    <label>Tags
+      <input id="fTags" type="text" maxlength="200" placeholder="e.g. Work, Banking" autocomplete="off" autocorrect="off" spellcheck="false">
+    </label>
+    <div id="tagPick" class="chips pick" role="group" aria-label="Your tags" hidden></div>
     <label class="check"><input id="fFav" type="checkbox"> Favourite</label>
     <label>Notes
       <textarea id="fNotes" rows="3" maxlength="5000" autocomplete="off"></textarea>

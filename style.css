@@ -271,3 +271,24 @@ a.btn { display: inline-flex; align-items: center; text-decoration: none; }
 .fold > :not(summary) { margin-left: 18px; margin-right: 18px; }
 .fold > summary + * { margin-top: 16px; }
 .fold > :last-child { margin-bottom: 16px; }
+
+/* Tag chips: filter row above the list, and the picker in the editor */
+.chips { display: flex; gap: 8px; overflow-x: auto; padding: 2px 0 14px; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+.chips::-webkit-scrollbar { display: none; }
+.chips.pick { flex-wrap: wrap; overflow: visible; padding: 0 0 14px; margin-top: -6px; }
+.chip { flex: none; border: 0; font: inherit; font-size: 15px; font-weight: 500; color: var(--text); background: var(--panel); border-radius: 999px; padding: 8px 14px; cursor: pointer; white-space: nowrap; }
+.chips.pick .chip { background: var(--field); font-size: 14px; padding: 6px 12px; }
+.chip .n { color: var(--muted); margin-left: 6px; font-weight: 400; }
+.chip[aria-pressed="true"], .chips.pick .chip[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+.chip[aria-pressed="true"] .n { color: inherit; opacity: .8; }
+.chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Devices list in Settings */
+.dev-row { padding: 12px 0; border-top: .5px solid var(--line); }
+.dev-row:first-child { border-top: 0; padding-top: 0; }
+.dev-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.dev-top strong { font-size: 17px; overflow-wrap: anywhere; }
+.dev-row .muted { font-size: 14px; margin: 2px 0 8px; }
+.dev-acts { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.dev-acts input { flex: 1; min-width: 150px; margin: 0; }
+.badge.here { color: var(--accent); background: var(--accent-soft); }
