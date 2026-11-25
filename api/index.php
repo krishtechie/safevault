@@ -33,7 +33,7 @@ if ($dataDir === '' || strlen($secret) < 32 || str_contains($secret, 'CHANGE_ME'
     || strlen($invite) < 12 || str_contains($invite, 'CHANGE_ME')) {
     fail(500, 'not_configured');
 }
-foreach (['', '/users', '/vaults', '/throttle', '/sessions', '/pins', '/logs', '/geo'] as $sub) {
+foreach (['', '/users', '/vaults', '/throttle', '/sessions', '/pins', '/logs', '/geo', '/history'] as $sub) {
     if (!is_dir($dataDir . $sub) && !@mkdir($dataDir . $sub, 0700, true)) fail(500, 'data_dir_unwritable');
 }
 // Housekeeping, on roughly one request in forty: remove attempt counters and location answers that have
@@ -217,7 +217,41 @@ $userFile  = fn(string $u) => "$dataDir/users/$u.json";
 $vaultFile = fn(string $u) => "$dataDir/vaults/$u.json";
 
 // Access log: one line per event, per account. Kept to the most recent 500 events.
-$audit = function (string $u, string $event, ?string $typed = null) use ($dataDir, $ip): void {
+// Email alerts for the events worth knowing about straight away. Off unless 'alert_email' is set in config.php.
+const ALERT_EVENTS = [
+    'device_new'     => 'Your vault was opened on a new device',
+    'device_refused' => 'A signed-out device tried to connect and was refused',
+    'device_off'     => 'A device was signed out from another device',
+    'login_blocked'  => 'Sign-in was blocked after 5 wrong master passwords',
+    'pin_locked'     => 'A PIN was turned off after 3 wrong tries',
+    'rekey'          => 'Your master password was changed',
+    'recover_ok'     => 'Your account was recovered with the recovery key',
+    'recovery_clear' => 'Your recovery key was removed',
+    'totp_off'       => 'Two-factor sign-in was turned off',
+    'history_restore' => 'Your vault was restored to an earlier version',
+];
+$alert = function (string $u, string $event) use ($cfg, $ip): void {
+    $to = $cfg['alert_email'] ?? null;
+    if (!is_string($to) || !filter_var($to, FILTER_VALIDATE_EMAIL) || !isset(ALERT_EVENTS[$event]) || $u === '_server') return;
+    // At most one email per kind of event every 10 minutes, and 12 an hour in all, so a flood of attempts cannot flood the inbox.
+    if (throttle_count("mail:$u|$event", 600) >= 1 || throttle_count('mail-all', 3600) >= 12) return;
+    throttle_hit("mail:$u|$event", 600);
+    throttle_hit('mail-all', 3600);
+    $host = (string)($_SERVER['HTTP_HOST'] ?? '');
+    if (!preg_match('/^[A-Za-z0-9.-]{1,100}(:\d{1,5})?$/', $host)) $host = 'vault';
+    $domain = explode(':', $host)[0];
+    $ua = substr((string)preg_replace('/[^\x20-\x7E]/', '', (string)($_SERVER['HTTP_USER_AGENT'] ?? '')), 0, 200);
+    $text = ALERT_EVENTS[$event] . ".\r\n\r\n"
+        . "Account: $u\r\nWhen: " . gmdate('D, d M Y H:i') . " UTC\r\nAddress: $ip\r\nBrowser: $ua\r\n\r\n"
+        . "If this was you, nothing needs doing. If it was not, open https://$host, change your master password, "
+        . "and sign out any device you do not recognise under Settings, Devices.\r\n\r\n"
+        . "This message holds no passwords. The full record is under Settings, Access log.\r\n";
+    $from = is_string($cfg['alert_from'] ?? null) && filter_var($cfg['alert_from'], FILTER_VALIDATE_EMAIL) ? $cfg['alert_from'] : "vault@$domain";
+    @mail($to, 'Vault alert: ' . ALERT_EVENTS[$event], $text, "From: Vault <$from>\r\nContent-Type: text/plain; charset=UTF-8\r\nX-Auto-Response-Suppress: All");
+};
+
+$audit = function (string $u, string $event, ?string $typed = null) use ($dataDir, $ip, $alert): void {
+    $alert($u, $event);
     // $u = '_server' is the server-wide log of attempts that belong to no account (or to someone else's).
     $file = "$dataDir/logs/$u.log";
     $ua = substr((string)preg_replace('/[^\x20-\x7E]/', '', (string)($_SERVER['HTTP_USER_AGENT'] ?? '')), 0, 200);
@@ -373,12 +407,14 @@ const PIN_TRIES = 3;
 const DEVICE_MAX = 20;
 // Records this browser as one of the account's devices (or refreshes when it was last seen).
 // $trustH: hash of the two-factor trust token this device just used, so the two can be removed together later.
-$touchDevice = function (string $u, ?string $trustH = null) use ($updateUser, $dh): void {
-    if ($dh === null) return;
-    $updateUser($u, function (array $user) use ($dh, $trustH) {
+$touchDevice = function (string $u, ?string $trustH = null) use ($updateUser, $dh): bool {
+    if ($dh === null) return false;
+    $isNew = false;
+    $updateUser($u, function (array $user) use ($dh, $trustH, &$isNew) {
         $now = time();
         $ua = substr((string)preg_replace('/[^\x20-\x7E]/', '', (string)($_SERVER['HTTP_USER_AGENT'] ?? '')), 0, 200);
         $devs = is_array($user['devices'] ?? null) ? $user['devices'] : [];
+        $isNew = !isset($devs[$dh]);
         $devs[$dh] = ['name' => $devs[$dh]['name'] ?? null, 'ua' => $ua, 'first' => (int)($devs[$dh]['first'] ?? $now), 'last' => $now];
         // Signed-out devices are remembered for 60 days so they are refused if they come back, then forgotten.
         $devs = array_filter($devs, fn($d) => empty($d['off']) || (int)$d['off'] > $now - 60 * 86400);
@@ -395,6 +431,7 @@ $touchDevice = function (string $u, ?string $trustH = null) use ($updateUser, $d
         }
         return $user;
     });
+    return $isNew;
 };
 // Removes what a device could use to get back in quietly: its PIN record and its two-factor trust.
 $forgetDevice = function (string $u, array $user, string $d) use ($dataDir): array {
@@ -456,6 +493,37 @@ $isTrusted = function (array $user, mixed $token) use ($trustHash): bool {
     if ($h === null) return false;
     foreach ($user['trusted'] ?? [] as $t) if (hash_equals((string)($t['h'] ?? ''), $h)) return true;
     return false;
+};
+
+/* ---------- Version history ---------- */
+
+// Every save first files the copy it replaces. Kept: the 5 most recent, then older ones at least an hour apart,
+// 35 in all. Each copy is the same encrypted blob the vault file held, so the server can read none of them.
+const HISTORY_RECENT = 5;
+const HISTORY_MAX = 35;
+$historyDir = fn(string $u) => "$dataDir/history/$u";
+$historyList = function (string $u) use ($historyDir): array {
+    $out = [];
+    foreach (glob($historyDir($u) . '/*.json') ?: [] as $f) {
+        if (preg_match('~/(\d{1,12})\.json$~', $f, $m)) $out[] = ['rev' => (int)$m[1], 'at' => (int)@filemtime($f), 'size' => (int)@filesize($f), 'file' => $f];
+    }
+    usort($out, fn($a, $b) => $b['rev'] <=> $a['rev']);
+    return $out;
+};
+$keepHistory = function (string $u, array $v) use ($historyDir, $historyList): void {
+    $dir = $historyDir($u);
+    if (!is_dir($dir) && !@mkdir($dir, 0700, true)) return; // history is a safety net; a save never fails because of it
+    $file = $dir . '/' . (int)$v['rev'] . '.json';
+    if (@file_put_contents($file, json_encode(['rev' => (int)$v['rev'], 'blob' => $v['blob'], 'updated' => (int)($v['updated'] ?? time())], JSON_UNESCAPED_SLASHES), LOCK_EX) === false) return;
+    @chmod($file, 0600);
+    @touch($file, (int)($v['updated'] ?? time()));
+    $kept = 0;
+    $lastAt = 0;
+    foreach ($historyList($u) as $i => $h) {
+        if ($i < HISTORY_RECENT) { $kept++; $lastAt = $h['at']; continue; }
+        if ($kept < HISTORY_MAX && $lastAt - $h['at'] >= 3600) { $kept++; $lastAt = $h['at']; }
+        else @unlink($h['file']);
+    }
 };
 
 /* ---------- Actions ---------- */
@@ -554,7 +622,7 @@ case 'POST login': {
         $audit($u, 'device_trusted');
     }
     sign_in($u, (int)($user['gen'] ?? 0));
-    $touchDevice($u, $trustHash($body['trust'] ?? null));
+    if ($touchDevice($u, $trustHash($body['trust'] ?? null))) $audit($u, 'device_new');
     // 'auto' marks the app renewing its own session after a Face ID or PIN unlock, with no password typed.
     // It only changes the wording in the log. The same key and the same checks are required either way.
     $audit($u, ($body['auto'] ?? false) === true ? 'login_renew' : 'login_ok');
@@ -867,9 +935,22 @@ case 'POST note': {
     // Events that happen only on the device (Face ID) are reported here so they appear in the log.
     $u = require_user();
     $e = (string)($body['e'] ?? '');
-    if (!in_array($e, ['bio_ok', 'bio_on', 'bio_off', 'rollback_seen'], true)) fail(400, 'bad_event');
+    if (!in_array($e, ['bio_ok', 'bio_on', 'bio_off', 'rollback_seen', 'history_restore'], true)) fail(400, 'bad_event');
     $audit($u, $e);
     out(200, ['ok' => true]);
+}
+
+case 'GET history': {
+    $u = require_user();
+    out(200, ['versions' => array_map(fn($h) => ['rev' => $h['rev'], 'at' => $h['at'], 'size' => $h['size']], $historyList($u))]);
+}
+
+case 'GET history_get': {
+    $u = require_user();
+    $rev = (string)($_GET['rev'] ?? '');
+    if (!preg_match('/^\d{1,12}$/', $rev)) fail(400, 'bad_rev');
+    $h = read_json($historyDir($u) . '/' . (int)$rev . '.json') ?? fail(404, 'no_version');
+    out(200, ['rev' => (int)$h['rev'], 'blob' => $h['blob'], 'at' => (int)($h['updated'] ?? 0)]);
 }
 
 case 'GET vault': {
@@ -887,11 +968,14 @@ case 'POST save': {
     if (!valid_blob($body['blob'] ?? null)) fail(400, 'bad_blob');
     if (!is_int($body['baseRev'] ?? null)) fail(400, 'bad_rev');
     $file = $vaultFile($u);
-    with_lock($file . '.lock', function () use ($file, $body, $audit, $u) {
+    with_lock($file . '.lock', function () use ($file, $body, $audit, $u, $keepHistory) {
         $v = read_json($file) ?? ['rev' => 0, 'blob' => null];
         // Another device saved first: hand back the newer copy so the client can merge and retry.
         if ((int)$v['rev'] !== $body['baseRev']) out(409, ['error' => 'conflict', 'rev' => (int)$v['rev'], 'blob' => $v['blob']]);
-        if ($v['blob'] !== null) @copy($file, $file . '.prev'); // keep one previous version
+        if ($v['blob'] !== null) {
+            @copy($file, $file . '.prev'); // keep one previous version
+            $keepHistory($u, $v);
+        }
         $rev = (int)$v['rev'] + 1;
         // After a rollback, a device restores its newer copy and lifts the version past the one it had seen.
         $restore = is_int($body['restoreRev'] ?? null) && $body['restoreRev'] >= $rev && $body['restoreRev'] < $rev + 1000000;

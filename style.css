@@ -292,3 +292,11 @@ a.btn { display: inline-flex; align-items: center; text-decoration: none; }
 .dev-acts { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .dev-acts input { flex: 1; min-width: 150px; margin: 0; }
 .badge.here { color: var(--accent); background: var(--accent-soft); }
+
+/* Version history */
+.hist-row { display: flex; align-items: center; gap: 10px; padding: 11px 0; border-top: .5px solid var(--line); flex-wrap: wrap; }
+.hist-row:first-child { border-top: 0; padding-top: 0; }
+.hist-row .log-main { flex: 1; min-width: 150px; }
+.hist-row .muted { font-size: 14px; margin: 2px 0 0; }
+.hist-detail { flex-basis: 100%; background: var(--field); border-radius: 14px; padding: 12px 14px; }
+.hist-detail p { margin: 0 0 10px; }

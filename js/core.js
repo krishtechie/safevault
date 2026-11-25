@@ -555,6 +555,8 @@ export const LOG_EVENTS = Object.freeze({
   totp_fail: ['Wrong authenticator code after a correct master password', 'fail'],
   device_trusted: ['New device approved with an authenticator code', 'change'],
   device_off: ['A device was signed out from another device', 'change'],
+  device_new: ['Signed in on a new device', 'change'],
+  history_restore: ['Vault restored to an earlier version', 'change'],
   device_refused: ['A signed-out device tried to connect and was refused', 'fail'],
   login_blocked: ['Sign-in blocked for 15 minutes after 5 wrong tries', 'fail'],
   recover_blocked: ['Recovery blocked for 15 minutes after 5 wrong tries', 'fail'],
@@ -728,4 +730,35 @@ export function healthFindings(items, breach = {}, now = Date.now()) {
   const old = liveItems.filter((it) => it.pwAt > 0 && now - it.pwAt > OLD_DAYS * DAY);
   const ids = new Set([...leaked.map((x) => x.it.id), ...reused.flat().map((it) => it.id), ...weak.map((it) => it.id), ...old.map((it) => it.id)]);
   return { leaked, reused, weak, old, total: ids.size, checked: liveItems.length };
+}
+
+/* ---------- Version history ---------- */
+
+// What going back to an earlier copy would do, without doing it.
+// returns: entries that would come back or revert, and entries added since that would move to Recently deleted.
+export function snapshotDiff(current, snapshot) {
+  const alive = (list) => list.filter((it) => !it.deleted && !it.trashedAt);
+  const now = new Map(alive(current).map((it) => [it.id, it]));
+  const then = new Map(alive(snapshot).map((it) => [it.id, it]));
+  const same = (a, b) => ['title', 'username', 'password', 'url', 'notes', 'totp'].every((k) => (a[k] || '') === (b[k] || ''))
+    && !!a.fav === !!b.fav && (a.tags || []).join('\n') === (b.tags || []).join('\n');
+  let back = 0, changed = 0, removed = 0;
+  for (const [id, it] of then) { if (!now.has(id)) back++; else if (!same(it, now.get(id))) changed++; }
+  for (const id of now.keys()) if (!then.has(id)) removed++;
+  return { total: then.size, back, changed, removed };
+}
+// Goes back to an earlier copy. Every entry of that copy returns exactly as it was, stamped with the present time so
+// it wins on the other devices. Entries added since are not destroyed: they move to Recently deleted.
+export function restoreSnapshot(current, snapshot, now = Date.now()) {
+  const then = new Map(snapshot.filter((it) => !it.deleted).map((it) => [it.id, it]));
+  const out = [];
+  const seen = new Set();
+  for (const it of current) {
+    seen.add(it.id);
+    if (then.has(it.id)) out.push({ ...then.get(it.id), updatedAt: now });
+    else if (it.deleted || it.trashedAt) out.push(it);
+    else out.push({ ...it, trashedAt: now, updatedAt: now });
+  }
+  for (const [id, it] of then) if (!seen.has(id)) out.push({ ...it, updatedAt: now });
+  return out;
 }

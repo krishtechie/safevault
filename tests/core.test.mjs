@@ -476,3 +476,34 @@ test('tags: cleaned, limited, matched without regard to case, and kept through e
   assert.ok(!('tags' in got[1]));
   assert.ok(!('tags' in core.importCsv('name,url,username,password,note\nG,https://g.test,me,pw-g-12345,\n', []).items[0])); // Google export has no folders
 });
+
+test('version history: going back restores the old copy and moves newer entries to Recently deleted', () => {
+  const e = (id, title, extra = {}) => ({ id, title, username: '', password: 'pw-' + title, url: '', notes: '', createdAt: 1, updatedAt: 5, deleted: false, ...extra });
+  const snapshot = [e('a', 'Alpha'), e('b', 'Bravo', { tags: ['Work'] }), e('c', 'Charlie'), e('t', 'Was in trash', { trashedAt: 3 }), { id: 'x', deleted: true, updatedAt: 2 }];
+  const current = [
+    e('a', 'Alpha'),                               // untouched
+    e('b', 'Bravo', { password: 'changed', updatedAt: 50 }), // edited since
+    { id: 'c', deleted: true, updatedAt: 60 },     // deleted for good since
+    e('n', 'New since'),                           // added since
+    e('g', 'Already in trash', { trashedAt: 40 }),
+    { id: 'z', deleted: true, updatedAt: 9 },
+  ];
+  assert.deepEqual(core.snapshotDiff(current, snapshot), { total: 3, back: 1, changed: 1, removed: 1 });
+  assert.deepEqual(core.snapshotDiff(snapshot, snapshot), { total: 3, back: 0, changed: 0, removed: 0 });
+  const now = 1000;
+  const out = core.restoreSnapshot(current, snapshot, now);
+  const by = Object.fromEntries(out.map((it) => [it.id, it]));
+  assert.equal(new Set(out.map((it) => it.id)).size, out.length);
+  assert.equal(by.b.password, 'pw-Bravo'); assert.deepEqual(by.b.tags, ['Work']); assert.equal(by.b.updatedAt, now);
+  assert.ok(!by.c.deleted && by.c.title === 'Charlie' && by.c.updatedAt === now); // back from permanent deletion
+  assert.equal(by.n.trashedAt, now); assert.equal(by.n.title, 'New since');           // kept, recoverable
+  assert.equal(by.g.trashedAt, 40);                                                   // left alone
+  assert.deepEqual(by.z, { id: 'z', deleted: true, updatedAt: 9 });
+  assert.equal(by.t.trashedAt, 3);                                                    // as it was in the old copy
+  assert.ok(!('x' in by)); // an old removal marker for something this device never had is not brought back
+  // The restored state wins over what any other device still holds.
+  const merged = core.mergeItems(current, out);
+  assert.equal(merged.find((it) => it.id === 'b').password, 'pw-Bravo');
+  assert.equal(core.snapshotDiff(out, snapshot).back + core.snapshotDiff(out, snapshot).changed + core.snapshotDiff(out, snapshot).removed, 0);
+  assert.deepEqual(core.restoreSnapshot([], [], now), []);
+});

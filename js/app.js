@@ -8,7 +8,7 @@ const API = 'api/index.php';
 // The page and this script are published together. Right after an update a browser can hold one of them from
 // before; the missing parts would then stop the app from starting. When they do not match, fetch fresh copies
 // and reload, once.
-const BUILD = '15';
+const BUILD = '16';
 {
   const page = document.querySelector('meta[name="vault-build"]');
   let tried = false;
@@ -556,6 +556,9 @@ function lock(message = '') {
   $('tagPick').replaceChildren();
   $('devList').replaceChildren();
   $('devMsg').textContent = '';
+  $('histList').replaceChildren();
+  $('histMsg').textContent = '';
+  histOpen = null;
   $('healthBadge').hidden = true;
   $('healthSum').textContent = '';
   $('toast').classList.remove('show', 'has-action');
@@ -1843,6 +1846,90 @@ async function loadDevices() {
   }
 }
 $('devFold').addEventListener('toggle', () => { if ($('devFold').open) loadDevices(); });
+
+/* ---------- Version history ---------- */
+
+let histOpen = null; // { rev, items } of the copy being looked at
+function renderHistory(versions) {
+  const frag = document.createDocumentFragment();
+  for (const v of versions) {
+    const row = document.createElement('div');
+    row.className = 'hist-row';
+    const main = document.createElement('div');
+    main.className = 'log-main';
+    const when = document.createElement('strong');
+    when.textContent = new Date(v.at * 1000).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+    const sub = document.createElement('p');
+    sub.className = 'muted';
+    sub.textContent = `${since(v.at)} · ${Math.max(1, Math.round(v.size / 1024))} KB`;
+    main.append(when, sub);
+    const view = document.createElement('button');
+    view.type = 'button';
+    view.className = 'btn small';
+    view.textContent = histOpen && histOpen.rev === v.rev ? 'Close' : 'View';
+    view.setAttribute('aria-label', (histOpen && histOpen.rev === v.rev ? 'Close copy from ' : 'View copy from ') + when.textContent);
+    view.addEventListener('click', async () => {
+      $('histMsg').textContent = '';
+      if (histOpen && histOpen.rev === v.rev) { histOpen = null; renderHistory(versions); return; }
+      view.disabled = true;
+      try {
+        const r = await authed(() => api('history_get', null, '&rev=' + v.rev));
+        if (!S.encKey) return;
+        // Opened with the vault key on this device. The server only ever held the encrypted copy.
+        histOpen = { rev: v.rev, items: await core.decryptVault(S.encKey, S.username, r.blob) };
+      } catch (e) {
+        histOpen = null;
+        $('histMsg').textContent = e.offline ? 'Opening a copy needs internet.' : e.message === 'newer_format' ? ERRORS.newer_format : 'That copy could not be opened.';
+      }
+      renderHistory(versions);
+    });
+    row.append(main, view);
+    if (histOpen && histOpen.rev === v.rev) {
+      const d = core.snapshotDiff(S.items, histOpen.items);
+      const box = document.createElement('div');
+      box.className = 'hist-detail';
+      const p = document.createElement('p');
+      const n = (k, one, many) => (k === 1 ? `1 ${one}` : `${k} ${many}`);
+      const parts = [];
+      if (d.back) parts.push(n(d.back, 'entry would come back', 'entries would come back'));
+      if (d.changed) parts.push(n(d.changed, 'entry would return to how it was', 'entries would return to how they were'));
+      if (d.removed) parts.push(n(d.removed, 'newer entry would move to Recently deleted', 'newer entries would move to Recently deleted'));
+      p.textContent = `This copy holds ${n(d.total, 'entry', 'entries')}. ` + (parts.length ? parts.join(', ') + '.' : 'It matches your vault as it is now.');
+      box.append(p);
+      if (parts.length) {
+        const go = document.createElement('button');
+        go.type = 'button';
+        go.className = 'btn small danger';
+        go.textContent = 'Go back to this copy';
+        armed(go, 'Go back to this copy', async () => {
+          S.items = core.restoreSnapshot(S.items, histOpen.items);
+          histOpen = null;
+          await persist();
+          authed(() => api('note', { e: 'history_restore' })).catch(() => {});
+          toast('Vault restored to that copy');
+          loadHistory();
+        });
+        box.append(go);
+      }
+      row.append(box);
+    }
+    frag.append(row);
+  }
+  $('histList').replaceChildren(frag);
+  if (!versions.length) $('histMsg').textContent = 'No earlier copies yet. One is kept each time your vault changes.';
+}
+async function loadHistory() {
+  if (!S.encKey) return;
+  try {
+    const r = await authed(() => api('history'));
+    if (!S.encKey) return;
+    $('histMsg').textContent = '';
+    renderHistory(r.versions || []);
+  } catch (e) {
+    if (S.encKey) $('histMsg').textContent = e.offline ? 'Version history needs internet.' : 'Could not load version history.';
+  }
+}
+$('histFold').addEventListener('toggle', () => { if ($('histFold').open) loadHistory(); else histOpen = null; });
 
 /* ---------- Startup ---------- */
 
