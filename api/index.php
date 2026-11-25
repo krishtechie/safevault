@@ -260,36 +260,68 @@ function ua_label(string $ua): string {
     }
     return "$br on $os";
 }
-// The notice as a small card. Tables and inline styles only, because that is what mail apps render reliably.
-// No links, no images, no remote content. Every value is escaped.
+// The notice as a designed card: a navy header with the logo, a colour bar for the kind of event, the account,
+// the details, and an optional button. Tables and inline styles only, because that is what mail apps render
+// reliably. The only remote content is the logo, and only when a site address is set in config. Every value is escaped.
 function alert_html(string $title, string $tone, array $rows, string $foot, ?string $link = null): string {
     $e = fn(string $v) => htmlspecialchars($v, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
-    [$colour, $label] = ['ok' => ['#34c759', 'Sign-in'], 'fail' => ['#ff3b30', 'Needs your attention'], 'new' => ['#ff9500', 'New device'], 'change' => ['#ff9500', 'Security change']][$tone];
+    [$colour, $soft, $label] = [
+        'ok'     => ['#1f9d55', '#e6f6ec', 'Sign-in'],
+        'fail'   => ['#d92d20', '#fdecea', 'Needs your attention'],
+        'new'    => ['#b25e09', '#fff3e0', 'New device'],
+        'change' => ['#b25e09', '#fff3e0', 'Security change'],
+    ][$tone];
     $font = "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;";
+    $tbl = 'role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"';
+    $account = (string)($rows['Account'] ?? '');
+    unset($rows['Account']);
+    // Logo: the app icon from the vault's own address. If the mail app blocks images, the blue tile behind it still shows.
+    $logo = $link === null ? "<span style=\"{$font}font-size:20px;line-height:40px;font-weight:700;color:#ffffff;\">V</span>"
+        : "<img src=\"" . $e(rtrim($link, '/') . '/icons/icon-192.png') . "\" width=\"40\" height=\"40\" alt=\"\" style=\"display:block;border:0;border-radius:10px;\">";
     $out = "<!doctype html>\r\n<html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-        . "<meta name=\"color-scheme\" content=\"light dark\"><title>" . $e($title) . "</title></head>\r\n"
-        . "<body style=\"margin:0;padding:0;background:#f2f2f7;\">\r\n"
-        . "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"background:#f2f2f7;\"><tr><td align=\"center\" style=\"padding:28px 14px;\">\r\n"
-        . "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"max-width:480px;\">\r\n"
-        . "<tr><td style=\"{$font}font-size:15px;font-weight:700;letter-spacing:.2px;color:#1c1c1e;padding:0 6px 14px;\">Vault"
-        . "<span style=\"font-weight:400;color:#8e8e93;\"> &nbsp;Security notice</span></td></tr>\r\n"
-        . "<tr><td style=\"background:#ffffff;border-radius:18px;padding:0;\">\r\n"
-        . "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\">\r\n"
-        . "<tr><td style=\"padding:22px 22px 6px;\"><span style=\"{$font}display:inline-block;font-size:12px;font-weight:600;color:#ffffff;background:{$colour};border-radius:999px;padding:4px 11px;\">" . $e($label) . "</span></td></tr>\r\n"
-        . "<tr><td style=\"{$font}font-size:21px;line-height:27px;font-weight:700;color:#1c1c1e;padding:8px 22px 16px;\">" . $e($title) . "</td></tr>\r\n";
-    foreach ($rows as $k => $v) {
-        $out .= "<tr><td style=\"padding:0 22px;\"><table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"border-top:1px solid #e5e5ea;\"><tr>"
-            . "<td width=\"92\" valign=\"top\" style=\"{$font}font-size:14px;line-height:20px;color:#8e8e93;padding:11px 0;\">" . $e((string)$k) . "</td>"
-            . "<td valign=\"top\" style=\"{$font}font-size:15px;line-height:20px;color:#1c1c1e;padding:11px 0;word-break:break-word;\">" . $e((string)$v) . "</td>"
+        . "<meta name=\"color-scheme\" content=\"light\"><title>" . $e($title) . "</title></head>\r\n"
+        . "<body style=\"margin:0;padding:0;background:#eef1f6;\">\r\n"
+        . "<table $tbl style=\"background:#eef1f6;\"><tr><td align=\"center\" style=\"padding:26px 12px;\">\r\n"
+        . "<table $tbl style=\"max-width:500px;\">\r\n"
+        // header
+        . "<tr><td bgcolor=\"#0b1b33\" style=\"background:#0b1b33;border-radius:18px 18px 0 0;padding:18px 22px;\">\r\n"
+        . "<table $tbl><tr>"
+        . "<td width=\"40\" height=\"40\" align=\"center\" valign=\"middle\" bgcolor=\"#0a84ff\" style=\"background:#0a84ff;border-radius:10px;\">$logo</td>"
+        . "<td valign=\"middle\" style=\"padding-left:12px;\">"
+        . "<div style=\"{$font}font-size:18px;line-height:22px;font-weight:700;color:#ffffff;\">Vault</div>"
+        . "<div style=\"{$font}font-size:13px;line-height:18px;color:#9db2d0;\">Security notice</div></td>"
+        . "</tr></table></td></tr>\r\n"
+        // colour bar
+        . "<tr><td height=\"5\" bgcolor=\"$colour\" style=\"background:$colour;font-size:0;line-height:0;\">&nbsp;</td></tr>\r\n"
+        // body
+        . "<tr><td bgcolor=\"#ffffff\" style=\"background:#ffffff;border-radius:0 0 18px 18px;\">\r\n<table $tbl>\r\n"
+        . "<tr><td style=\"padding:24px 22px 0;\"><span style=\"{$font}display:inline-block;font-size:12px;line-height:16px;font-weight:700;color:$colour;background:$soft;border-radius:999px;padding:5px 12px;\">" . $e($label) . "</span></td></tr>\r\n"
+        . "<tr><td style=\"{$font}font-size:22px;line-height:28px;font-weight:700;color:#0b1b33;padding:12px 22px 0;\">" . $e($title) . "</td></tr>\r\n";
+    if ($account !== '') {
+        $initial = strtoupper(substr($account, 0, 1));
+        $out .= "<tr><td style=\"padding:16px 22px 0;\"><table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\"><tr>"
+            . "<td width=\"36\" height=\"36\" align=\"center\" valign=\"middle\" bgcolor=\"#0b1b33\" style=\"background:#0b1b33;border-radius:18px;{$font}font-size:15px;font-weight:700;color:#ffffff;\">" . $e($initial) . "</td>"
+            . "<td valign=\"middle\" style=\"padding-left:10px;\"><div style=\"{$font}font-size:12px;line-height:15px;color:#6b7a90;\">Account</div>"
+            . "<div style=\"{$font}font-size:15px;line-height:20px;font-weight:600;color:#0b1b33;\">" . $e($account) . "</div></td>"
             . "</tr></table></td></tr>\r\n";
     }
-    $button = $link === null ? '' : "<tr><td style=\"padding:16px 0 0;\"><a href=\"" . $e($link) . "\" style=\"{$font}display:inline-block;font-size:15px;font-weight:600;"
-        . "color:#ffffff;background:#007aff;border-radius:999px;padding:11px 22px;text-decoration:none;\">Open Vault</a></td></tr>\r\n"
-        . "<tr><td style=\"{$font}font-size:12px;line-height:18px;color:#8e8e93;padding:10px 0 0;word-break:break-all;\">" . $e($link) . "</td></tr>";
-    $out .= "<tr><td style=\"padding:0 22px 22px;\"><table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"border-top:1px solid #e5e5ea;\"><tr>"
-        . "<td style=\"{$font}font-size:14px;line-height:21px;color:#3a3a3c;padding:14px 0 0;\">" . $e($foot) . "</td></tr>$button</table></td></tr>\r\n"
-        . "</table></td></tr>\r\n"
-        . "<tr><td style=\"{$font}font-size:12px;line-height:18px;color:#8e8e93;padding:14px 6px 0;\">Sent by your own Vault server. " . ($link === null ? 'This notice holds no secrets and no links.' : 'This notice holds no secrets. Its one link is the address shown above; check it before you sign in.') . "</td></tr>\r\n"
+    $out .= "<tr><td style=\"padding:18px 22px 0;\"><table $tbl bgcolor=\"#f5f7fa\" style=\"background:#f5f7fa;border-radius:14px;\">\r\n";
+    $n = 0;
+    foreach ($rows as $k => $v) {
+        $line = $n++ ? 'border-top:1px solid #e3e8ef;' : '';
+        $out .= "<tr><td width=\"84\" valign=\"top\" style=\"{$font}font-size:13px;line-height:20px;color:#6b7a90;padding:11px 0 11px 16px;$line\">" . $e((string)$k) . "</td>"
+            . "<td valign=\"top\" style=\"{$font}font-size:15px;line-height:20px;color:#0b1b33;padding:11px 16px 11px 0;word-break:break-word;$line\">" . $e((string)$v) . "</td></tr>\r\n";
+    }
+    $out .= "</table></td></tr>\r\n"
+        . "<tr><td style=\"{$font}font-size:14px;line-height:21px;color:#3d4b5f;padding:18px 22px 0;\">" . $e($foot) . "</td></tr>\r\n";
+    if ($link !== null) {
+        $out .= "<tr><td style=\"padding:18px 22px 0;\"><a href=\"" . $e($link) . "\" style=\"{$font}display:inline-block;font-size:15px;line-height:20px;font-weight:600;"
+            . "color:#ffffff;background:#0a84ff;border-radius:999px;padding:12px 26px;text-decoration:none;\">Open Vault</a></td></tr>\r\n"
+            . "<tr><td style=\"{$font}font-size:12px;line-height:18px;color:#6b7a90;padding:10px 22px 0;word-break:break-all;\">" . $e($link) . "</td></tr>\r\n";
+    }
+    $out .= "<tr><td height=\"24\" style=\"font-size:0;line-height:0;\">&nbsp;</td></tr>\r\n</table></td></tr>\r\n"
+        . "<tr><td align=\"center\" style=\"{$font}font-size:12px;line-height:18px;color:#7c8aa0;padding:16px 10px 0;\">Sent by your own Vault server. This notice holds no secrets. "
+        . ($link === null ? 'It has no links.' : 'Its one link is the address shown above; check it before you sign in.') . "</td></tr>\r\n"
         . "</table></td></tr></table>\r\n</body></html>";
     return $out;
 }
