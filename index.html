@@ -151,8 +151,8 @@
 
     <section id="view-settings" class="view" hidden>
       <h2>Settings</h2>
-      <div class="card">
-        <h3>Auto-lock</h3>
+      <details class="card fold" name="settings">
+        <summary><h3>Auto-lock</h3><span class="fold-sub">Lock timing and staying unlocked</span></summary>
         <label>Lock after inactivity
           <select id="lockMin">
             <option value="1">1 minute</option>
@@ -163,9 +163,9 @@
         </label>
         <label class="check"><input id="stayUnlocked" type="checkbox" checked> Stay unlocked when the page reloads</label>
         <p class="muted">Keeps the vault open through a refresh until the auto-lock time passes or you tap Lock. Turn this off on a shared computer.</p>
-      </div>
-      <div class="card">
-        <h3>Quick unlock</h3>
+      </details>
+      <details class="card fold" name="settings">
+        <summary><h3>Quick unlock</h3><span class="fold-sub">PIN and Face ID or Touch ID</span></summary>
         <p class="muted">Open the vault on this device with a 6-digit PIN or with Face ID or Touch ID, instead of typing the master password each time. Three wrong PINs in a row turn the PIN off, and the master password is needed again.</p>
         <label>Current master password
           <input id="qPass" type="password" autocomplete="off">
@@ -189,9 +189,9 @@
           <button id="bioOff" class="btn danger" type="button" hidden>Turn off Face ID</button>
         </div>
         <p id="bioMsg" class="msg"></p>
-      </div>
-      <div class="card">
-        <h3>Two-factor sign-in</h3>
+      </details>
+      <details class="card fold" name="settings">
+        <summary><h3>Two-factor sign-in</h3><span class="fold-sub">A code from your authenticator at sign-in</span></summary>
         <p id="tfaStatus" class="muted"></p>
         <p class="muted">With this on, signing in on a new device needs your master password and a 6-digit code from an authenticator app (Apple Passwords, Google Authenticator, Microsoft Authenticator and others). Devices you already use are not asked again. If you lose the authenticator, the recovery key gets you back in.</p>
         <label>Current master password
@@ -214,9 +214,9 @@
           <button id="tfaOn" class="btn primary" type="button">Turn on</button>
         </div>
         <p id="tfaMsg" class="msg"></p>
-      </div>
-      <div class="card">
-        <h3>Master password</h3>
+      </details>
+      <details class="card fold" name="settings">
+        <summary><h3>Master password</h3><span class="fold-sub">Change it</span></summary>
         <label>Current master password
           <input id="cpCur" type="password" autocomplete="off">
         </label>
@@ -228,9 +228,9 @@
         </label>
         <button id="cpBtn" class="btn" type="button">Change master password</button>
         <p id="cpMsg" class="msg"></p>
-      </div>
-      <div class="card">
-        <h3>Recovery key</h3>
+      </details>
+      <details class="card fold" name="settings">
+        <summary><h3>Recovery key</h3><span class="fold-sub">Your way back in if you forget the master password</span></summary>
         <p id="recStatus" class="muted"></p>
         <p class="muted">A recovery key lets you set a new master password if you forget it. Anyone who has it and your username can open your vault, so keep it on paper somewhere safe, not in this vault and not in a photo.</p>
         <label>Current master password
@@ -246,9 +246,9 @@
             <button id="recHide" class="btn small" type="button">I have saved it</button>
           </div>
         </div>
-      </div>
-      <div class="card">
-        <h3>Access log</h3>
+      </details>
+      <details class="card fold" name="settings">
+        <summary><h3>Access log</h3><span class="fold-sub">Sign-ins and attempts on your account</span></summary>
         <p class="muted">Every sign-in, failed attempt and security change on your account, from any device. The server keeps the latest 500 events.</p>
         <div class="split">
           <label>Show
@@ -279,9 +279,9 @@
         <p id="logScope" class="muted"></p>
         <p id="logMsg" class="msg"></p>
         <div id="logList" class="log"></div>
-      </div>
-      <div class="card">
-        <h3>Import passwords</h3>
+      </details>
+      <details class="card fold" name="settings">
+        <summary><h3>Import passwords</h3><span class="fold-sub">From Google, Safari, Firefox and others</span></summary>
         <p class="muted">Bring in a CSV export from Google or Chrome, Safari, Firefox, Edge, Bitwarden, 1Password, LastPass and similar. Entries already in the vault are skipped.</p>
         <label>CSV file
           <input id="csvFile" type="file" accept=".csv,text/csv,text/comma-separated-values,application/vnd.ms-excel,text/plain">
@@ -289,9 +289,9 @@
         <button id="csvBtn" class="btn" type="button">Import from CSV</button>
         <p id="csvMsg" class="msg"></p>
         <p class="note">An export file holds every password in plain text. Delete it from your device and empty the trash as soon as the import is done.</p>
-      </div>
-      <div class="card">
-        <h3>Backup</h3>
+      </details>
+      <details class="card fold" name="settings">
+        <summary><h3>Backup</h3><span class="fold-sub">Export or restore an encrypted file</span></summary>
         <p class="muted">The backup file is encrypted with your master password. Keep a copy somewhere other than this server.</p>
         <button id="exportBtn" class="btn" type="button">Download encrypted backup</button>
         <hr>
@@ -303,7 +303,7 @@
         </label>
         <button id="importBtn" class="btn" type="button">Merge backup into vault</button>
         <p id="importMsg" class="msg"></p>
-      </div>
+      </details>
       <div class="card">
         <h3>This device</h3>
         <p class="muted">Signed in as <strong id="whoami"></strong>. Signing out removes the encrypted copy stored on this device. Your vault stays on the server.</p>

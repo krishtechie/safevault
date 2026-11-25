@@ -499,6 +499,7 @@ function lock(message = '') {
   $('rollbackBar').hidden = true;
   $('updateBar').hidden = true;
   if ($('trashDlg').open) $('trashDlg').close();
+  for (const d of document.querySelectorAll('details.fold')) d.open = false; // settings sections fold shut again
   $('trashList').replaceChildren();
   $('trashOpen').hidden = true;
   $('healthBadge').hidden = true;
