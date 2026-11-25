@@ -317,3 +317,6 @@ a.btn { display: inline-flex; align-items: center; text-decoration: none; }
 .backup-codes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 14px; white-space: pre; letter-spacing: .04em; }
 #totpAlt { margin-top: 2px; }
 #aTotp.code-text { letter-spacing: .08em; font-size: 20px; }
+
+/* Recovery form: the "lost my authenticator" switch sits between two fields and needs room below it. */
+#recDropField { font-size: 15px; margin: 2px 0 18px; }

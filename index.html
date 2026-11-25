@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="vault-build" content="20">
+<meta name="vault-build" content="21">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://api.pwnedpasswords.com; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
@@ -45,6 +45,7 @@
     <label id="recField" hidden>Recovery key
       <input id="aRec" type="text" autocapitalize="characters" autocorrect="off" spellcheck="false" autocomplete="off" placeholder="XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX">
     </label>
+    <label id="recDropField" class="check" hidden><input id="aRecDrop" type="checkbox"> I also lost my authenticator app. Turn two-factor sign-in off</label>
     <label id="passField"><span id="aPassLabel">Master password</span>
       <input id="aPass" type="password" autocomplete="off">
     </label>

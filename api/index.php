@@ -970,15 +970,24 @@ case 'POST recover_finish': {
     if (b64_len($body['salt'] ?? null) !== 16) fail(400, 'bad_salt');
     if (b64_len($body['newAuth'] ?? null) !== 32) fail(400, 'bad_auth');
     if (!valid_wrap($body['wrap'] ?? null)) fail(400, 'bad_wrap');
+    // Two-factor sign-in stays on unless the person says the authenticator is lost too.
+    // The recovery key is still the way back in after losing it, so asking is enough.
+    $dropTotp = !empty($body['dropTotp']);
     $hadTotp = false;
-    $user = $updateUser($u, function (array $user) use ($body, $kdf, &$hadTotp) {
+    $user = $updateUser($u, function (array $user) use ($body, $kdf, $dropTotp, $trustHash, &$hadTotp) {
         $user['salt'] = $body['salt'];
         $user['kdf'] = $kdf;
         $user['auth_hash'] = password_hash($body['newAuth'], PASSWORD_DEFAULT);
         $user['wrap'] = $body['wrap'];
         $user['gen'] = (int)($user['gen'] ?? 0) + 1;
         $hadTotp = !empty($user['totp']);
-        unset($user['totp'], $user['trusted']); // the recovery key is also the way back in after losing the authenticator
+        if ($dropTotp || !$hadTotp) {
+            unset($user['totp'], $user['trusted']);
+        } else {
+            // As with a password change, only the device doing the recovery stays trusted.
+            $mine = $trustHash($body['trust'] ?? null);
+            $user['trusted'] = array_values(array_filter($user['trusted'] ?? [], fn($t) => $mine !== null && hash_equals((string)($t['h'] ?? ''), $mine)));
+        }
         return $user;
     });
     $clearPins($u);
@@ -987,9 +996,9 @@ case 'POST recover_finish': {
     sign_in($u, $user['gen']);
     $touchDevice($u);
     $audit($u, 'recover_ok');
-    if ($hadTotp) $audit($u, 'totp_off');
+    if ($hadTotp && $dropTotp) $audit($u, 'totp_off');
     $v = read_json($vaultFile($u));
-    out(200, ['rev' => (int)($v['rev'] ?? 0)]);
+    out(200, ['rev' => (int)($v['rev'] ?? 0), 'totp' => !empty($user['totp'])]);
 }
 
 case 'POST pin_set': {

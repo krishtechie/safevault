@@ -8,7 +8,7 @@ const API = 'api/index.php';
 // The page and this script are published together. Right after an update a browser can hold one of them from
 // before; the missing parts would then stop the app from starting. When they do not match, fetch fresh copies
 // and reload, once.
-const BUILD = '20';
+const BUILD = '21';
 {
   const page = document.querySelector('meta[name="vault-build"]');
   let tried = false;
@@ -206,6 +206,7 @@ function setAuthMode(m) {
   $('passField').hidden = m === 'pin';
   $('pinField').hidden = m !== 'pin';
   $('recField').hidden = m !== 'recover';
+  $('recDropField').hidden = m !== 'recover';
   $('confirmField').hidden = m !== 'register' && m !== 'recover';
   $('inviteField').hidden = m !== 'register';
   $('regNote').hidden = m !== 'register';
@@ -383,19 +384,26 @@ async function recover(username, code, password) {
   const kdf = { ...core.KDF_DEFAULT };
   const keys = await core.deriveKeys(password, salt, kdf);
   const wrap = await core.wrapKey(keys.kek, username, vkRaw);
-  await api('recover_finish', { username, recAuth: rec.auth, newAuth: keys.auth, salt, kdf, wrap });
+  const dropTotp = $('aRecDrop').checked;
+  const done = await api('recover_finish', {
+    username, recAuth: rec.auth, newAuth: keys.auth, salt, kdf, wrap, dropTotp,
+    trust: trust && trust.username === username ? trust.token : undefined,
+  });
   if (quick) delete quick.pin; // the server turned PINs off for this account
   const vk = await core.importVaultKey(vkRaw);
   const v = await api('vault');
   const remote = await core.decryptVault(vk, username, v.blob);
   const extra = await unsyncedLocal(await store.get('state'), username, vk);
   Object.assign(S, {
-    username, encKey: vk, auth: keys.auth, salt, kdf, wrap, hasRecovery: true, totp: false,
+    username, encKey: vk, auth: keys.auth, salt, kdf, wrap, hasRecovery: true, totp: !!done.totp,
     items: core.mergeItems(extra, remote), rev: v.rev, dirty: extra.length > 0,
   });
   S.hash = await core.sha256Hex(v.blob);
-  trust = null; // recovery turned two-factor sign-in off on the server
-  await store.del('trust').catch(() => {});
+  if (!done.totp) { // two-factor sign-in is off on the server, so the saved device pass means nothing
+    trust = null;
+    await store.del('trust').catch(() => {});
+  }
+  $('aRecDrop').checked = false;
   await cacheState(extra.length ? await core.encryptVault(vk, username, S.items) : v.blob);
 }
 
@@ -524,7 +532,7 @@ $('authForm').addEventListener('submit', async (ev) => {
     $('totpField').hidden = true;
     setBackupMode(false);
     enterApp();
-    if (started === 'recover') toast('New master password set');
+    if (started === 'recover') toast(S.totp ? 'New master password set. Two-factor sign-in is still on' : 'New master password set');
     else if (notice) toast(notice);
     notice = '';
   } catch (e) {
