@@ -244,6 +244,7 @@ const ALERT_EVENTS = [
     'totp_off'       => 'Two-factor sign-in was turned off',
     'history_restore' => 'Your vault was restored to an earlier version',
 ];
+const ALERT_SMART = ['device_new', 'rekey', 'recover_ok', 'totp_off', 'recovery_clear', 'login_blocked', 'recover_blocked'];
 // Which colour the notice carries: green for a normal sign-in, red for a failed or refused attempt, amber for a change.
 const ALERT_TONES = [
     'login_ok' => 'ok', 'device_new' => 'new', 'backup_used' => 'fail',
@@ -265,76 +266,72 @@ function ua_label(string $ua): string {
 // The notice as a designed card: a navy header with the logo, a colour bar for the kind of event, the account,
 // the details, and an optional button. Tables and inline styles only, because that is what mail apps render
 // reliably. The only remote content is the logo, and only when a site address is set in config. Every value is escaped.
-function alert_html(string $title, string $tone, array $rows, string $foot, ?string $link = null): string {
+// What each emailed event means, in one plain sentence. Events without a line here use their title.
+const ALERT_BODY = [
+    'device_new'      => 'Your vault was just opened on a device it has not seen before.',
+    'rekey'           => 'The details you use to sign in to your vault were just changed. Your other devices were signed out and will ask for the new ones.',
+    'recover_ok'      => 'Your account was just recovered with the recovery key, and new sign-in details were set.',
+    'totp_off'        => 'Two-factor sign-in was just turned off. A new device no longer needs an authenticator code.',
+    'recovery_clear'  => 'The recovery key for your vault was just removed. The old key no longer works.',
+    'login_blocked'   => 'Wrong sign-in details were entered 5 times in a row, so sign-in from that network is paused for 15 minutes.',
+    'recover_blocked' => 'A wrong recovery key was entered 5 times in a row, so recovery from that network is paused for 15 minutes.',
+];
+
+// The notice as a letter: logo, a large headline, a short colour bar, a greeting, what happened, the facts,
+// what to do, then a quiet footer. One white column with dark text, so a mail app in dark mode can flip it
+// cleanly; the logo and the button are pictures, which mail apps leave alone.
+function alert_html(string $title, string $tone, array $rows, string $foot, ?string $link = null, string $lead = ''): string {
     $e = fn(string $v) => htmlspecialchars($v, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
-    [$colour, $soft, $label] = [
-        'ok'     => ['#1f9d55', '#e6f6ec', 'Sign-in'],
-        'fail'   => ['#d92d20', '#fdecea', 'Needs your attention'],
-        'new'    => ['#b25e09', '#fff3e0', 'New device'],
-        'change' => ['#b25e09', '#fff3e0', 'Security change'],
-    ][$tone];
+    $bar = $tone === 'fail' ? '#d92d20' : '#1f6bff';
     $font = "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;";
     $tbl = 'role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"';
     $account = (string)($rows['Account'] ?? '');
     unset($rows['Account']);
-    $logo = "<span style=\"{$font}font-size:20px;line-height:40px;font-weight:700;color:#ffffff;\">V</span>";
-    $wordText = "{$font}font-size:24px;line-height:26px;font-weight:800;letter-spacing:8.8px;color:#ffffff;";
-    $word = "<div style=\"$wordText\">VAULT</div><div style=\"{$font}font-size:9px;line-height:14px;font-weight:600;letter-spacing:1px;color:#a9b6d3;padding-top:3px;\">PASSWORD MANAGER</div>";
-    // Header. With a site address it is one picture (navy band, icon, lettering), because mail apps in dark mode
-    // recolour backgrounds and text but leave pictures alone, so the brand stays as designed in light and dark.
-    // Without an address the same header is built from plain cells and text.
+    $pad = 'padding-left:32px;padding-right:32px;';
     if ($link !== null) {
-        $header = "<tr><td bgcolor=\"#0a1433\" style=\"background:#0a1433;border-radius:18px 18px 0 0;padding:0;\">"
-            . "<img src=\"" . $e(rtrim($link, '/') . '/icons/email-header.png') . "\" width=\"500\" alt=\"VAULT Password Manager\" "
-            . "style=\"display:block;width:100%;max-width:500px;height:auto;border:0;border-radius:18px 18px 0 0;{$font}font-size:20px;line-height:80px;font-weight:800;letter-spacing:3px;color:#ffffff;text-align:center;\"></td></tr>\r\n";
+        $icon = "<img src=\"" . $e(rtrim($link, '/') . '/icons/email-logo.png') . "\" width=\"44\" height=\"44\" alt=\"\" style=\"display:block;border:0;width:44px;height:44px;\">";
     } else {
-        $header = "<tr><td bgcolor=\"#0a1433\" style=\"background:#0a1433;border-radius:18px 18px 0 0;padding:18px 22px;\">\r\n"
-            . "<table $tbl><tr>"
-            . "<td width=\"40\" height=\"40\" align=\"center\" valign=\"middle\" bgcolor=\"#1f5fe0\" style=\"background:#1f5fe0;border-radius:10px;\">$logo</td>"
-            . "\r\n<td valign=\"middle\" style=\"padding-left:14px;\">$word</td>\r\n"
-            . "\r\n<td valign=\"middle\" align=\"right\" style=\"{$font}font-size:12px;line-height:16px;color:#a9b6d3;\">Security notice</td>\r\n"
-            . "</tr></table></td></tr>\r\n";
+        $icon = "<table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\"><tr><td width=\"44\" height=\"44\" align=\"center\" valign=\"middle\" bgcolor=\"#1f6bff\" "
+            . "style=\"background:#1f6bff;border-radius:11px;{$font}font-size:22px;line-height:44px;font-weight:700;color:#ffffff;\">V</td></tr></table>";
     }
     $out = "<!doctype html>\r\n<html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-        . "<meta name=\"color-scheme\" content=\"light\"><title>" . $e($title) . "</title></head>\r\n"
-        . "<body style=\"margin:0;padding:0;background:#eef1f6;\">\r\n"
-        . "<table $tbl style=\"background:#eef1f6;\"><tr><td align=\"center\" style=\"padding:26px 12px;\">\r\n"
-        . "<table $tbl style=\"max-width:500px;\">\r\n"
-        // header
-        . $header
-        // colour bar
-        . "<tr><td height=\"5\" bgcolor=\"$colour\" style=\"background:$colour;font-size:0;line-height:0;\">&nbsp;</td></tr>\r\n"
-        // body
-        . "<tr><td bgcolor=\"#ffffff\" style=\"background:#ffffff;border-radius:0 0 18px 18px;\">\r\n<table $tbl>\r\n"
-        . "<tr><td style=\"padding:24px 22px 0;\"><span style=\"{$font}display:inline-block;font-size:12px;line-height:16px;font-weight:700;color:$colour;background:$soft;border-radius:999px;padding:5px 12px;\">" . $e($label) . "</span></td></tr>\r\n"
-        . "<tr><td style=\"{$font}font-size:22px;line-height:28px;font-weight:700;color:#0a1433;padding:12px 22px 0;\">" . $e($title) . "</td></tr>\r\n";
-    if ($account !== '') {
-        $initial = strtoupper(substr($account, 0, 1));
-        $out .= "<tr><td style=\"padding:16px 22px 0;\"><table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\"><tr>"
-            . "<td width=\"36\" height=\"36\" align=\"center\" valign=\"middle\" bgcolor=\"#0a1433\" style=\"background:#0a1433;border-radius:18px;{$font}font-size:15px;font-weight:700;color:#ffffff;\">" . $e($initial) . "</td>"
-            . "<td valign=\"middle\" style=\"padding-left:10px;\"><div style=\"{$font}font-size:12px;line-height:15px;color:#6b7a90;\">Account</div>"
-            . "<div style=\"{$font}font-size:15px;line-height:20px;font-weight:600;color:#0a1433;\">" . $e($account) . "</div></td>"
-            . "</tr></table></td></tr>\r\n";
-    }
-    $out .= "<tr><td style=\"padding:18px 22px 0;\"><table $tbl bgcolor=\"#f5f7fa\" style=\"background:#f5f7fa;border-radius:14px;\">\r\n";
-    $n = 0;
+        . "<title>" . $e($title) . "</title></head>\r\n"
+        . "<body style=\"margin:0;padding:0;background:#f3f5f9;\">\r\n"
+        . "<table $tbl style=\"background:#f3f5f9;\"><tr><td align=\"center\" style=\"padding:24px 10px;\">\r\n"
+        . "<table $tbl bgcolor=\"#ffffff\" style=\"max-width:520px;background:#ffffff;\">\r\n"
+        // logo
+        . "<tr><td style=\"padding-top:34px;$pad\"><table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\"><tr>"
+        . "<td width=\"44\" valign=\"middle\">$icon</td>\r\n"
+        . "<td valign=\"middle\" style=\"padding-left:12px;\"><div style=\"{$font}font-size:21px;line-height:24px;font-weight:800;letter-spacing:6px;color:#0a1433;\">VAULT</div>"
+        . "<div style=\"{$font}font-size:9px;line-height:13px;font-weight:600;letter-spacing:2.2px;color:#6b7a90;padding-top:2px;\">PASSWORD MANAGER</div></td>"
+        . "</tr></table></td></tr>\r\n"
+        // headline and colour bar
+        . "<tr><td style=\"{$font}font-size:29px;line-height:38px;font-weight:300;color:#0a1433;padding-top:34px;$pad\">" . $e($title) . "</td></tr>\r\n"
+        . "<tr><td style=\"padding-top:20px;$pad\"><table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\"><tr>"
+        . "<td width=\"64\" height=\"5\" bgcolor=\"$bar\" style=\"background:$bar;font-size:0;line-height:0;\">&nbsp;</td></tr></table></td></tr>\r\n";
+    $text = "{$font}font-size:16px;line-height:26px;color:#27344a;";
+    if ($account !== '') $out .= "<tr><td style=\"{$text}padding-top:26px;$pad\">Hi " . $e($account) . ",</td></tr>\r\n";
+    if ($lead !== '') $out .= "<tr><td style=\"{$text}padding-top:16px;$pad\">" . $e($lead) . "</td></tr>\r\n";
+    // the facts
+    $out .= "<tr><td style=\"padding-top:20px;$pad\"><table $tbl>\r\n";
     foreach ($rows as $k => $v) {
-        $line = $n++ ? 'border-top:1px solid #e3e8ef;' : '';
-        $out .= "<tr><td width=\"84\" valign=\"top\" style=\"{$font}font-size:13px;line-height:20px;color:#6b7a90;padding:11px 0 11px 16px;$line\">" . $e((string)$k) . "</td>"
-            . "<td valign=\"top\" style=\"{$font}font-size:15px;line-height:20px;color:#0a1433;padding:11px 16px 11px 0;word-break:break-word;$line\">" . $e((string)$v) . "</td></tr>\r\n";
+        $out .= "<tr><td width=\"82\" valign=\"top\" style=\"{$font}font-size:13px;line-height:22px;color:#6b7a90;padding:9px 0;border-top:1px solid #e3e8ef;\">" . $e((string)$k) . "</td>"
+            . "<td valign=\"top\" style=\"{$font}font-size:15px;line-height:22px;color:#0a1433;padding:9px 0;border-top:1px solid #e3e8ef;word-break:break-word;\">" . $e((string)$v) . "</td></tr>\r\n";
     }
     $out .= "</table></td></tr>\r\n"
-        . "<tr><td style=\"{$font}font-size:14px;line-height:21px;color:#3d4b5f;padding:18px 22px 0;\">" . $e($foot) . "</td></tr>\r\n";
+        . "<tr><td style=\"{$text}padding-top:18px;$pad\">" . $e($foot) . "</td></tr>\r\n";
     if ($link !== null) {
-        $out .= "<tr><td style=\"padding:18px 22px 0;\"><a href=\"" . $e($link) . "\" style=\"text-decoration:none;\">"
+        $out .= "<tr><td style=\"padding-top:22px;$pad\"><a href=\"" . $e($link) . "\" style=\"text-decoration:none;\">"
             . "<img src=\"" . $e(rtrim($link, '/') . '/icons/email-button.png') . "\" width=\"150\" height=\"44\" alt=\"Open Vault\" "
-            . "style=\"display:block;border:0;{$font}font-size:15px;line-height:44px;font-weight:600;color:#1f5fe0;\"></a></td></tr>\r\n"
-            . "<tr><td style=\"{$font}font-size:12px;line-height:18px;color:#6b7a90;padding:10px 22px 0;word-break:break-all;\">" . $e($link) . "</td></tr>\r\n";
+            . "style=\"display:block;border:0;{$font}font-size:15px;line-height:44px;font-weight:600;color:#1f6bff;\"></a></td></tr>\r\n"
+            . "<tr><td style=\"{$font}font-size:12px;line-height:18px;color:#6b7a90;padding-top:10px;${pad}word-break:break-all;\">" . $e($link) . "</td></tr>\r\n";
     }
-    $out .= "<tr><td height=\"24\" style=\"font-size:0;line-height:0;\">&nbsp;</td></tr>\r\n</table></td></tr>\r\n"
-        . "<tr><td align=\"center\" style=\"{$font}font-size:12px;line-height:18px;font-weight:600;letter-spacing:1px;color:#0a1433;padding:18px 10px 0;\">Store &nbsp;<span style=\"color:#2f8bff;\">&bull;</span>&nbsp; Protect &nbsp;<span style=\"color:#2f8bff;\">&bull;</span>&nbsp; Access</td></tr>\r\n"
-        . "<tr><td align=\"center\" style=\"{$font}font-size:12px;line-height:18px;color:#7c8aa0;padding:6px 10px 0;\">Sent by your own Vault server. This notice holds no secrets. "
+    $small = "{$font}font-size:12px;line-height:19px;color:#6b7a90;";
+    $out .= "<tr><td style=\"padding-top:34px;$pad\"><table $tbl><tr><td height=\"2\" bgcolor=\"#e3e8ef\" style=\"background:#e3e8ef;font-size:0;line-height:0;\">&nbsp;</td></tr></table></td></tr>\r\n"
+        . "<tr><td style=\"{$font}font-size:14px;line-height:22px;color:#27344a;padding-top:22px;$pad\">This is an automated message from your own Vault server. Please do not reply.</td></tr>\r\n"
+        . "<tr><td style=\"{$small}padding-top:14px;$pad\">This notice holds no secrets. "
         . ($link === null ? 'It has no links.' : 'Its one link is the address shown above; check it before you sign in.') . "</td></tr>\r\n"
+        . "<tr><td style=\"{$font}font-size:11px;line-height:18px;font-weight:600;letter-spacing:1.5px;color:#6b7a90;padding-top:14px;padding-bottom:34px;$pad\">STORE &nbsp;<span style=\"color:#1f6bff;\">&bull;</span>&nbsp; PROTECT &nbsp;<span style=\"color:#1f6bff;\">&bull;</span>&nbsp; ACCESS</td></tr>\r\n"
         . "</table></td></tr></table>\r\n</body></html>";
     return $out;
 }
@@ -343,23 +340,12 @@ $alert = function (string $u, string $event) use ($cfg, $ip, $dh, $dataDir): voi
     $to = $cfg['alert_email'] ?? null;
     if (!is_string($to) || !filter_var($to, FILTER_VALIDATE_EMAIL) || !isset(ALERT_EVENTS[$event]) || $u === '_server') return;
     if (in_array($event, (array)($cfg['alert_skip'] ?? []), true)) return;
-    // Which events are worth an email. The default, 'smart', sends what a person would want to be interrupted for:
-    // a new device, any security change, a block, a backup code being used. It leaves out the everyday noise:
-    // signing in on a device already known, and a mistyped PIN or password on one of your own devices.
-    // A wrong master password or wrong authenticator code from a device the account has never seen still sends,
-    // once per 15 minutes, since that is someone else trying. 'alert_level' => 'all' in config.php sends everything.
-    if (($cfg['alert_level'] ?? 'smart') !== 'all') {
-        if ($event === 'login_ok' || $event === 'pin_fail') return;
-        if (in_array($event, ['login_fail', 'totp_fail', 'recover_fail'], true)) {
-            $known = false;
-            if ($dh !== null && $event === 'login_fail') {
-                $rec = read_json("$dataDir/users/$u.json");
-                $known = isset($rec['devices'][$dh]) && empty($rec['devices'][$dh]['off']);
-            }
-            if ($known || throttle_count("mailq:$u|$event", 900) >= 1) return;
-            throttle_hit("mailq:$u|$event", 900);
-        }
-    }
+    // Which events are worth an email. The default, 'smart', works like a password manager: it emails only when
+    // the vault is opened on a new device, when the way in changes (master password, recovery, two-factor turned
+    // off, recovery key removed), and when sign-in or recovery is blocked after repeated wrong tries.
+    // Everything else, such as wrong attempts, devices signed out, backup codes and PINs, is in the Access log only.
+    // 'alert_level' => 'all' in config.php sends an email for every event.
+    if (($cfg['alert_level'] ?? 'smart') !== 'all' && !in_array($event, ALERT_SMART, true)) return;
     // The one hard limit is 40 an hour, so a flood of attempts cannot bury the inbox or get the sending
     // address suspended. The Access log still records every event.
     if (throttle_count('mail-all', 3600) >= 40) return;
@@ -375,15 +361,18 @@ $alert = function (string $u, string $event) use ($cfg, $ip, $dh, $dataDir): voi
     $now = new DateTime('now', new DateTimeZone($tz));
     $when = $now->format('D, j M Y, g:i A') . ' ' . ($tz === 'UTC' ? 'UTC' : $now->format('T'));
     $rows = ['Account' => $u, 'When' => $when, 'Device' => ua_label($ua), 'Address' => $ip];
-    $foot = 'The full record is in the app under Settings, Access log. If this was not you, sign that device out under Settings, Devices.';
-    $text = $title . ".\r\n\r\n";
+    $lead = ALERT_BODY[$event] ?? '';
+    $foot = in_array($event, ['login_blocked', 'recover_blocked'], true)
+        ? 'If this was you, wait 15 minutes and try again. If it was not, nothing was opened: the block held. The full record is under Settings, Access log.'
+        : 'If this was you, there is nothing to do. If it was not, open Settings, Devices and sign that device out. The full record is under Settings, Access log.';
+    $text = $title . ".\r\n\r\n" . ($lead !== '' ? "$lead\r\n\r\n" : '');
     foreach ($rows as $k => $v) $text .= "$k: $v\r\n";
     // One optional link, to the vault itself. It comes only from config.php, never from the request, so nobody
     // can make these emails point somewhere else.
     $link = null;
     if (is_string($cfg['alert_link'] ?? null) && preg_match('~^https://[A-Za-z0-9.-]{1,100}(:\d{1,5})?(/[A-Za-z0-9._/-]{0,100})?$~', $cfg['alert_link'])) $link = $cfg['alert_link'];
     $text .= "\r\n$foot\r\n" . ($link !== null ? "\r\nOpen Vault: $link\r\n" : '');
-    $html = alert_html($title, ALERT_TONES[$event] ?? 'change', $rows, $foot, $link);
+    $html = alert_html($title, ALERT_TONES[$event] ?? 'change', $rows, $foot, $link, $lead);
     $boundary = 'vault-' . bin2hex(random_bytes(12));
     $body = "--$boundary\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: 7bit\r\n\r\n$text\r\n"
         . "--$boundary\r\nContent-Type: text/html; charset=UTF-8\r\nContent-Transfer-Encoding: 7bit\r\n\r\n$html\r\n"
