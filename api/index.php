@@ -222,9 +222,9 @@ const ALERT_EVENTS = [
     'device_new'     => 'Your vault was opened on a new device',
     'device_refused' => 'A signed-out device tried to connect and was refused',
     'device_off'     => 'A device was signed out from another device',
-    'login_blocked'  => 'Sign-in was blocked after 5 wrong master passwords',
+    'login_blocked'  => 'Sign-in was blocked after 5 wrong attempts',
     'pin_locked'     => 'A PIN was turned off after 3 wrong tries',
-    'rekey'          => 'Your master password was changed',
+    'rekey'          => 'Your sign-in details were changed',
     'recover_ok'     => 'Your account was recovered with the recovery key',
     'recovery_clear' => 'Your recovery key was removed',
     'totp_off'       => 'Two-factor sign-in was turned off',
@@ -238,20 +238,19 @@ $alert = function (string $u, string $event) use ($cfg, $ip): void {
     throttle_hit("mail:$u|$event", 600);
     throttle_hit('mail-all', 3600);
     $host = (string)($_SERVER['HTTP_HOST'] ?? '');
-    if (!preg_match('/^[A-Za-z0-9.-]{1,100}(:\d{1,5})?$/', $host)) $host = 'vault';
-    $domain = explode(':', $host)[0];
+    $domain = preg_match('/^[A-Za-z0-9.-]{1,100}(:\d{1,5})?$/', $host) ? explode(':', $host)[0] : 'vault';
     $ua = substr((string)preg_replace('/[^\x20-\x7E]/', '', (string)($_SERVER['HTTP_USER_AGENT'] ?? '')), 0, 200);
+    // Kept short and plain on purpose: no links and no calls to change anything, which outgoing mail
+    // filters read as phishing. The app's Access log has the detail.
     $text = ALERT_EVENTS[$event] . ".\r\n\r\n"
         . "Account: $u\r\nWhen: " . gmdate('D, d M Y H:i') . " UTC\r\nAddress: $ip\r\nBrowser: $ua\r\n\r\n"
-        . "If this was you, nothing needs doing. If it was not, open https://$host, change your master password, "
-        . "and sign out any device you do not recognise under Settings, Devices.\r\n\r\n"
-        . "This message holds no passwords. The full record is under Settings, Access log.\r\n";
+        . "The full record is in the app under Settings, Access log. If this was not you, sign that device out under Settings, Devices.\r\n";
     $from = is_string($cfg['alert_from'] ?? null) && filter_var($cfg['alert_from'], FILTER_VALIDATE_EMAIL) ? $cfg['alert_from'] : "vault@$domain";
     $headers = "From: Vault <$from>\r\nReply-To: $from\r\nContent-Type: text/plain; charset=UTF-8\r\nX-Auto-Response-Suppress: All";
     // Name the sender on the envelope too. Without it the hosting account's own login is used, which
     // receiving mail servers see as a mismatch and tend to file as spam. If the host refuses that, send plainly.
-    $sent = preg_match('/^[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+$/', $from) && @mail($to, 'Vault alert: ' . ALERT_EVENTS[$event], $text, $headers, '-f' . $from);
-    if (!$sent) @mail($to, 'Vault alert: ' . ALERT_EVENTS[$event], $text, $headers);
+    $sent = preg_match('/^[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+$/', $from) && @mail($to, 'Vault notice: ' . ALERT_EVENTS[$event], $text, $headers, '-f' . $from);
+    if (!$sent) @mail($to, 'Vault notice: ' . ALERT_EVENTS[$event], $text, $headers);
 };
 
 $audit = function (string $u, string $event, ?string $typed = null) use ($dataDir, $ip, $alert): void {
