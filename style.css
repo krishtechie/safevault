@@ -216,6 +216,15 @@ a.btn { display: inline-flex; align-items: center; text-decoration: none; }
   padding: 12px 20px; border-radius: 999px; font-size: 15px; font-weight: 600;
   transition: opacity .2s, transform .2s; max-width: calc(100vw - 32px); text-align: center; z-index: 50;
 }
+.toast.has-action { white-space: nowrap; pointer-events: auto; display: flex; align-items: center; gap: 14px; padding: 8px 8px 8px 20px; }
+.toast button { border: 0; font: inherit; font-size: 15px; font-weight: 700; color: var(--accent); background: var(--field); border-radius: 999px; padding: 8px 16px; cursor: pointer; }
+.trash-link { display: block; margin: 18px auto 0; }
+.tab { position: relative; }
+.tab-badge { font: 700 11px/1 var(--round); color: #fff; background: var(--danger); border-radius: 999px; padding: 3px 6px; min-width: 18px; text-align: center; margin-left: auto; }
+.health-sum { font-size: 17px; font-weight: 600; margin-bottom: 10px; }
+.health-sum.clear { color: var(--ok); }
+.trash-row { display: flex; align-items: center; gap: 8px; padding: 11px 0; border-top: .5px solid var(--line); }
+.trash-row .log-main { flex: 1; min-width: 0; }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 
 @media (max-width: 760px) {
@@ -230,6 +239,7 @@ a.btn { display: inline-flex; align-items: center; text-decoration: none; }
   .tabs { flex-direction: row; width: 100%; gap: 0; }
   .tab { flex: 1; flex-direction: column; gap: 2px; text-align: center; font-size: 10px; font-weight: 600; letter-spacing: 0; padding: 7px 2px 6px; border-radius: 999px; color: var(--text); }
   .tab svg { width: 26px; height: 26px; stroke: var(--text); }
+  .tab-badge { position: absolute; top: 2px; left: 50%; margin-left: 6px; }
   .tab.active { background: var(--field); color: var(--accent); }
   .tab.active svg { stroke: var(--accent); }
   .topbar { display: flex; justify-content: space-between; align-items: center; padding: calc(8px + env(safe-area-inset-top)) 14px 0; }

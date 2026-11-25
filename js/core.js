@@ -184,9 +184,13 @@ export async function deriveRecoveryKeys(code, username) {
 
 const aad = (username) => te.encode('vault-v1|' + username);
 
+// Raised whenever entries gain a field that an older copy of the app would silently drop.
+// A device running older code then refuses to open (and overwrite) a newer vault and asks for a reload.
+export const VAULT_FORMAT = 2;
+
 export async function encryptVault(encKey, username, items) {
   const iv = randomBytes(12); // fresh nonce on every save
-  const pt = te.encode(JSON.stringify({ items }));
+  const pt = te.encode(JSON.stringify({ fmt: VAULT_FORMAT, items }));
   const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: aad(username) }, encKey, pt);
   return JSON.stringify({ v: 1, iv: b64.enc(iv), ct: b64.enc(new Uint8Array(ct)) });
 }
@@ -197,6 +201,7 @@ export async function decryptVault(encKey, username, blob) {
   const pt = await crypto.subtle.decrypt(
     { name: 'AES-GCM', iv: b64.dec(o.iv), additionalData: aad(username) }, encKey, b64.dec(o.ct));
   const data = JSON.parse(td.decode(pt));
+  if (Number.isInteger(data.fmt) && data.fmt > VAULT_FORMAT) throw new Error('newer_format');
   return sanitizeItems(data.items);
 }
 
@@ -332,6 +337,8 @@ export function sanitizeItems(items) {
     };
     // Optional fields are present only when set, so older entries keep their exact shape.
     if (it.fav === true) clean.fav = true;
+    if (time(it.trashedAt)) clean.trashedAt = time(it.trashedAt); // in Recently deleted since this time
+    if (time(it.pwAt)) clean.pwAt = time(it.pwAt);                // when the password itself was last set
     try { const key = normalizeTotp(it.totp); if (key) clean.totp = key; } catch { /* drop an unusable key */ }
     out.push(clean);
   }
@@ -451,7 +458,7 @@ export async function pwnedCount(password, fetchFn = fetch) {
 export function findReused(items) {
   const byPw = new Map();
   for (const it of items) {
-    if (it.deleted || !it.password) continue;
+    if (it.deleted || it.trashedAt || !it.password) continue;
     if (!byPw.has(it.password)) byPw.set(it.password, []);
     byPw.get(it.password).push(it);
   }
@@ -574,7 +581,7 @@ export function importCsv(text, existing = []) {
   if (col.password < 0) throw new Error('csv_no_password_column');
   if (rows.length > 5001) throw new Error('csv_too_big');
   const keyOf = (it) => [it.url || it.title.toLowerCase(), it.username.toLowerCase(), it.password].join('\u0001');
-  const seen = new Set(existing.filter((it) => !it.deleted).map(keyOf));
+  const seen = new Set(existing.filter((it) => !it.deleted && !it.trashedAt).map(keyOf));
   const items = [];
   const skipped = [];
   let duplicates = 0;
@@ -635,4 +642,39 @@ export function newTotpSecret() {
 // The address a QR code or "add to authenticator" link carries.
 export function otpauthUri(secret, username, issuer = 'Vault') {
   return `otpauth://totp/${encodeURIComponent(issuer)}:${encodeURIComponent(username)}?secret=${secret}&issuer=${encodeURIComponent(issuer)}&algorithm=SHA1&digits=6&period=30`;
+}
+
+/* ---------- Recently deleted ---------- */
+
+export const TRASH_DAYS = 30;
+const DAY = 86400000;
+
+// Entries that have sat in Recently deleted for 30 days are removed for good. What remains is a small
+// marker (id and time) so the removal reaches the other devices.
+export function purgeTrash(items, now = Date.now()) {
+  let purged = 0;
+  const out = items.map((it) => {
+    if (it.deleted || !it.trashedAt || now - it.trashedAt < TRASH_DAYS * DAY) return it;
+    purged++;
+    return { id: it.id, deleted: true, updatedAt: now };
+  });
+  return { items: out, purged };
+}
+export const trashDaysLeft = (it, now = Date.now()) => Math.max(0, Math.ceil((it.trashedAt + TRASH_DAYS * DAY - now) / DAY));
+
+/* ---------- Health summary ---------- */
+
+export const OLD_DAYS = 365;
+
+// Everything the Health tab can say without contacting anyone. breach = results of the last breach check
+// kept on this device as { id: [timesSeen, updatedAtWhenChecked] }; a result is ignored once its entry has been edited.
+export function healthFindings(items, breach = {}, now = Date.now()) {
+  const liveItems = items.filter((it) => !it.deleted && !it.trashedAt && it.password);
+  const leaked = liveItems.filter((it) => Array.isArray(breach[it.id]) && breach[it.id][0] > 0 && breach[it.id][1] === it.updatedAt)
+    .map((it) => ({ it, count: breach[it.id][0] }));
+  const reused = findReused(liveItems);
+  const weak = liveItems.filter((it) => isWeak(it.password));
+  const old = liveItems.filter((it) => it.pwAt > 0 && now - it.pwAt > OLD_DAYS * DAY);
+  const ids = new Set([...leaked.map((x) => x.it.id), ...reused.flat().map((it) => it.id), ...weak.map((it) => it.id), ...old.map((it) => it.id)]);
+  return { leaked, reused, weak, old, total: ids.size, checked: liveItems.length };
 }

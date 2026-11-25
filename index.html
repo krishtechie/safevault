@@ -66,7 +66,7 @@
     <div class="tabs">
       <button class="tab active" data-view="vault" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="10" width="16" height="11" rx="3"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg><span>Passwords</span></button>
       <button class="tab" data-view="generator" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 0 1 13.700-5.600L20 8"/><path d="M20 4v4h-4"/><path d="M20 12a8 8 0 0 1-13.700 5.600L4 16"/><path d="M4 20v-4h4"/></svg><span>Generator</span></button>
-      <button class="tab" data-view="health" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v6c0 4.400-3 7.600-7 9-4-1.400-7-4.600-7-9V6z"/><path d="M9 12l2 2 4-4"/></svg><span>Health</span></button>
+      <button class="tab" data-view="health" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v6c0 4.400-3 7.600-7 9-4-1.400-7-4.600-7-9V6z"/><path d="M9 12l2 2 4-4"/></svg><span>Health</span><span id="healthBadge" class="tab-badge" hidden></span></button>
       <button class="tab" data-view="settings" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg><span>Settings</span></button>
     </div>
     <div class="side-foot">
@@ -76,6 +76,11 @@
   </nav>
 
   <div class="content">
+    <div id="updateBar" class="alert-bar" role="alert" hidden>
+      <strong>Update needed on this device</strong>
+      <p>Your vault was saved by a newer version of the app on another device. Reload to update before making changes here. Nothing on this device has been lost.</p>
+      <button id="updateReload" class="btn small" type="button">Reload now</button>
+    </div>
     <div id="rollbackBar" class="alert-bar" role="alert" hidden>
       <strong>Server copy looks wrong</strong>
       <p id="rollbackText"></p>
@@ -95,6 +100,7 @@
       </div>
       <div id="list" class="lists"></div>
       <p id="empty" class="muted center" hidden>Nothing here yet. Tap Add to save your first password.</p>
+      <button id="trashOpen" class="link trash-link" type="button" hidden>Recently deleted</button>
     </section>
 
     <section id="view-generator" class="view" hidden>
@@ -134,8 +140,10 @@
     <section id="view-health" class="view" hidden>
       <h2>Password health</h2>
       <div class="card">
-        <p class="muted">Checks every saved password against known breaches, and flags reused and weak ones. Only the first 5 characters of each password's hash are sent, so the passwords never leave this device.</p>
-        <button id="healthBtn" class="btn primary" type="button">Run check</button>
+        <p class="muted">Reused, weak and old passwords are found on this device as you go. The breach check compares every saved password against known leaks. Only the first 5 characters of each password's hash are sent, so the passwords never leave this device.</p>
+        <p id="healthSum" class="health-sum"></p>
+        <button id="healthBtn" class="btn primary" type="button">Check for breaches</button>
+        <p id="healthNote" class="muted"></p>
         <p id="healthMsg" class="muted"></p>
       </div>
       <div id="healthOut"></div>
@@ -338,6 +346,7 @@
     <label>Website
       <input id="fUrl" type="url" inputmode="url" maxlength="2048" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="https://">
     </label>
+    <p id="fAge" class="muted small"></p>
     <a id="fGo" class="link" target="_blank" rel="noopener noreferrer" hidden>Copy password and open website</a>
     <label>Authenticator key (optional)
       <input id="fTotp" type="text" maxlength="600" autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" placeholder="Key or otpauth:// link from the site">
@@ -361,6 +370,19 @@
       <button id="fSave" class="btn primary" type="submit">Save</button>
     </div>
   </form>
+</dialog>
+
+<!-- Recently deleted -->
+<dialog id="trashDlg" class="dlg">
+  <h2>Recently deleted</h2>
+  <p class="muted">Deleted entries stay here for 30 days, then they are removed for good on every device.</p>
+  <div id="trashList" class="log"></div>
+  <p id="trashEmpty" class="muted center" hidden>Nothing in Recently deleted.</p>
+  <div class="row end">
+    <button id="trashEmptyBtn" class="btn danger" type="button">Delete all now</button>
+    <span class="grow"></span>
+    <button id="trashClose" class="btn" type="button">Done</button>
+  </div>
 </dialog>
 
 <div id="toast" class="toast" role="status" aria-live="polite"></div>

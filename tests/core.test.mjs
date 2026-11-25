@@ -367,3 +367,80 @@ test('list order: favourites, then recently used on this device, then the rest b
   assert.deepEqual(core.groupForList([]), []);
   const flat = core.groupForList(items, { i0: 1 }).flatMap((g) => g.items); assert.equal(new Set(flat).size, items.length); // every entry appears exactly once
 });
+
+test('recently deleted: entries keep their content for 30 days, then become removal markers', () => {
+  const DAY = 86400000, now = 1800000000000;
+  const items = core.sanitizeItems([
+    { id: 'a', title: 'Fresh', password: 'pw-a', updatedAt: 5, trashedAt: now - 29 * DAY },
+    { id: 'b', title: 'Expired', password: 'pw-b', updatedAt: 5, trashedAt: now - 30 * DAY },
+    { id: 'c', title: 'Live', password: 'pw-c', updatedAt: 5, trashedAt: 'soon', pwAt: -4 },
+    { id: 'd', deleted: true, updatedAt: 9, trashedAt: 3 },
+  ]);
+  assert.equal(items[0].trashedAt, now - 29 * DAY);
+  assert.equal(items[0].password, 'pw-a'); // content kept while in the trash
+  assert.ok(!('trashedAt' in items[2]) && !('pwAt' in items[2])); // malformed values dropped
+  assert.deepEqual(items[3], { id: 'd', deleted: true, updatedAt: 9 });
+  const { items: out, purged } = core.purgeTrash(items, now);
+  assert.equal(purged, 1);
+  assert.deepEqual(out[1], { id: 'b', deleted: true, updatedAt: now }); // nothing of the entry is left
+  assert.equal(out[0], items[0]);
+  assert.equal(out[2], items[2]);
+  assert.equal(core.purgeTrash(out, now).purged, 0);
+  assert.equal(core.trashDaysLeft(items[0], now), 1);
+  assert.equal(core.trashDaysLeft({ trashedAt: now }, now), 30);
+  // A trashed entry does not count as reused, and does not block importing the same login again.
+  assert.deepEqual(core.findReused([{ id: 'x', password: 'same' }, { id: 'y', password: 'same', trashedAt: 1 }]), []);
+  const csv = 'name,url,username,password\nFresh,,,pw-a\n';
+  assert.equal(core.importCsv(csv, items).items.length, 1);
+  // Deleting on one device and restoring on another: the later action wins.
+  const trashed = { id: 'm', title: 'M', password: 'p', updatedAt: 10, trashedAt: 10 };
+  const restored = { id: 'm', title: 'M', password: 'p', updatedAt: 20 };
+  assert.ok(!core.mergeItems([trashed], [restored])[0].trashedAt);
+  assert.ok(!core.mergeItems([restored], [trashed])[0].trashedAt);
+  assert.equal(core.mergeItems([restored], [{ ...trashed, updatedAt: 30, trashedAt: 30 }])[0].trashedAt, 30);
+});
+
+test('health summary: counts each entry once and ignores trashed, deleted and edited entries', () => {
+  const DAY = 86400000, now = 1800000000000;
+  const strong = (n) => `Zq7!vK2#mX9$pL4@-${n}`;
+  const items = [
+    { id: 'leak', title: 'Leaked', password: strong(1), updatedAt: 100 },
+    { id: 'edited', title: 'Edited since check', password: strong(2), updatedAt: 200 },
+    { id: 'r1', title: 'Reuse 1', password: strong(3), updatedAt: 1 },
+    { id: 'r2', title: 'Reuse 2', password: strong(3), updatedAt: 1 },
+    { id: 'weakold', title: 'Weak and old', password: 'abc123', updatedAt: 1, pwAt: now - 400 * DAY },
+    { id: 'young', title: 'Young', password: strong(4), updatedAt: 1, pwAt: now - 364 * DAY },
+    { id: 'noage', title: 'Imported, age unknown', password: strong(5), updatedAt: 1 },
+    { id: 'bin', title: 'In trash', password: 'abc123', updatedAt: 100, trashedAt: 5, pwAt: 1 },
+    { id: 'gone', deleted: true, updatedAt: 1 },
+  ];
+  const breach = { leak: [1010, 100], edited: [5, 100], bin: [9, 100], young: [0, 1] };
+  const f = core.healthFindings(items, breach, now);
+  assert.deepEqual(f.leaked.map((x) => [x.it.id, x.count]), [['leak', 1010]]);
+  assert.deepEqual(f.reused.map((g) => g.map((it) => it.id)), [['r1', 'r2']]);
+  assert.deepEqual(f.weak.map((it) => it.id), ['weakold']);
+  assert.deepEqual(f.old.map((it) => it.id), ['weakold']);
+  assert.equal(f.total, 4); // leak, r1, r2, weakold (weak and old, counted once)
+  assert.equal(f.checked, 7);
+  assert.equal(core.healthFindings(items.slice(5, 7), {}, now).total, 0);
+  assert.equal(core.healthFindings([], undefined, now).total, 0);
+});
+
+test('vault format: a copy written by a newer app version is refused instead of being opened and trimmed', async () => {
+  const key = await core.importVaultKey(core.randomBytes(32));
+  const blob = await core.encryptVault(key, 'u', [{ id: '1', title: 'A', password: 'p', updatedAt: 1, trashedAt: 7, pwAt: 3 }]);
+  const back = await core.decryptVault(key, 'u', blob);
+  assert.equal(back[0].trashedAt, 7);
+  assert.equal(back[0].pwAt, 3);
+  // Build a blob the way a future version would, with a higher format number.
+  const seal = async (obj) => {
+    const iv = core.randomBytes(12);
+    const k = await crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt']);
+    const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: new TextEncoder().encode('vault-v1|u') }, k, new TextEncoder().encode(JSON.stringify(obj)));
+    return JSON.stringify({ v: 1, iv: core.b64.enc(iv), ct: core.b64.enc(new Uint8Array(ct)) });
+  };
+  const raw = core.randomBytes(32);
+  const k2 = await core.importVaultKey(raw.slice());
+  await assert.rejects(core.decryptVault(k2, 'u', await seal({ fmt: core.VAULT_FORMAT + 1, items: [] })), /newer_format/);
+  assert.deepEqual(await core.decryptVault(k2, 'u', await seal({ items: [{ id: 'o', title: 'Old format', updatedAt: 1 }] })), core.sanitizeItems([{ id: 'o', title: 'Old format', updatedAt: 1 }]));
+});

@@ -47,12 +47,20 @@ async function api(action, body, query = '') {
 }
 
 let toastTimer;
-function toast(text) {
+function toast(text, action = null) {
   const t = $('toast');
   t.textContent = text;
+  t.classList.toggle('has-action', !!action);
+  if (action) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = action.label;
+    b.addEventListener('click', () => { t.classList.remove('show', 'has-action'); action.run(); });
+    t.append(b);
+  }
   t.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove('show'), 2200);
+  toastTimer = setTimeout(() => t.classList.remove('show', 'has-action'), action ? 7000 : 2200);
 }
 
 let clipTimer;
@@ -68,6 +76,7 @@ async function copy(text, label = 'Copied') {
 
 const ERRORS = {
   bad_credentials: 'Wrong username or master password.',
+  newer_format: 'Your vault was saved by a newer version of the app. Reload this page to update, then unlock again.',
   bad_invite: 'That invite code is not valid.',
   username_taken: 'That username is already taken.',
   bad_username: 'Username: 3 to 32 characters, letters, numbers, dot, dash or underscore.',
@@ -465,7 +474,7 @@ function enterApp(activeAt = Date.now()) {
   renderAccount();
   rememberUnlock();
   refreshQuick();
-  sync();
+  if (sweepTrash()) persist(); else sync();
 }
 
 // After any unlock, make sure the quick-unlock record belongs to this user and holds the current sign-in key.
@@ -486,7 +495,16 @@ function lock(message = '') {
   S.totp = false;
   S.hash = '';
   S.rollback = null;
+  S.outdated = false;
   $('rollbackBar').hidden = true;
+  $('updateBar').hidden = true;
+  if ($('trashDlg').open) $('trashDlg').close();
+  $('trashList').replaceChildren();
+  $('trashOpen').hidden = true;
+  $('healthBadge').hidden = true;
+  $('healthSum').textContent = '';
+  $('toast').classList.remove('show', 'has-action');
+  $('toast').textContent = '';
   sealedAuth = null;
   // Cleared synchronously, so a reload right after Lock can never reopen the vault
   // even if the stored key has not finished being removed yet.
@@ -496,7 +514,7 @@ function lock(message = '') {
   for (const id of ['fTitle', 'fUser', 'fPass', 'fUrl', 'fNotes', 'fTotp', 'search', 'importPass', 'cpCur', 'cpNew', 'cpNew2', 'recPass', 'qPass', 'qPin', 'qPin2', 'tfaPass', 'tfaCode']) $(id).value = '';
   $('tfaSetup').hidden = true;
   tfaPending = null;
-  for (const id of ['healthMsg', 'cpMsg', 'recMsg', 'recCode', 'pinMsg', 'bioMsg', 'csvMsg', 'tfaMsg', 'tfaKey']) $(id).textContent = '';
+  for (const id of ['healthMsg', 'healthNote', 'fAge', 'cpMsg', 'recMsg', 'recCode', 'pinMsg', 'bioMsg', 'csvMsg', 'tfaMsg', 'tfaKey']) $(id).textContent = '';
   $('csvFile').value = '';
   $('recOut').hidden = true;
   $('list').replaceChildren();
@@ -605,6 +623,7 @@ async function mergeRemote(blob, rev) {
   S.items = core.mergeItems(S.items, remote);
   S.rev = rev;
   S.hash = await core.sha256Hex(blob);
+  if (sweepTrash()) { S.dirty = true; S.changes++; }
   if (!S.dirty) await cacheState(blob);
   renderList();
 }
@@ -624,8 +643,15 @@ function raiseRollback(kind, serverRev, blob) {
   if (first) authed(() => api('note', { e: 'rollback_seen' })).catch(() => {});
 }
 
+// Entries that have been in Recently deleted for 30 days are removed for good. True when anything changed.
+function sweepTrash() {
+  const { items, purged } = core.purgeTrash(S.items);
+  if (purged) S.items = items;
+  return purged > 0;
+}
+
 async function doSync() {
-  if (S.rollback) { setStatus('error'); return; } // paused until the user restores
+  if (S.rollback || S.outdated) { setStatus('error'); return; } // paused until the user restores or reloads
   setStatus('syncing');
   try {
     for (let attempt = 0; attempt < 6 && S.encKey; attempt++) {
@@ -669,9 +695,15 @@ async function doSync() {
     }
     if (S.encKey) setStatus(S.dirty ? 'pending' : 'synced');
   } catch (e) {
+    if (e.message === 'newer_format' && S.encKey) {
+      // Another device runs a newer version of the app. Saving from here could drop what it added, so stop and ask for a reload.
+      S.outdated = true;
+      $('updateBar').hidden = false;
+    }
     if (S.encKey) setStatus(e.offline ? 'offline' : 'error');
   }
 }
+$('updateReload').addEventListener('click', () => location.reload());
 
 // Puts this device's newer copy back on the server, keeping anything the server copy has that this device lacks.
 $('rollbackFix').addEventListener('click', async () => {
@@ -730,9 +762,10 @@ function showView(name) {
   if (name === 'vault' && wideScreen() && !$('itemDlg').open) setTimeout(() => $('search').focus(), 0);
   for (const t of document.querySelectorAll('.tab')) t.classList.toggle('active', t.dataset.view === name);
 }
-for (const t of document.querySelectorAll('.tab')) t.addEventListener('click', () => { showView(t.dataset.view); if (t.dataset.view === 'settings') loadLog(); });
+for (const t of document.querySelectorAll('.tab')) t.addEventListener('click', () => { showView(t.dataset.view); if (t.dataset.view === 'settings') loadLog(); if (t.dataset.view === 'health') refreshHealth(); });
 
-const live = () => S.items.filter((it) => !it.deleted);
+const live = () => S.items.filter((it) => !it.deleted && !it.trashedAt);
+const trashed = () => S.items.filter((it) => !it.deleted && it.trashedAt).sort((a, b) => b.trashedAt - a.trashedAt);
 
 // Which entries were used last on this device. Only ids and times are kept, never names or passwords,
 // and it stays on the device so that using an entry does not rewrite the vault.
@@ -825,6 +858,11 @@ function renderList() {
   $('list').replaceChildren(frag);
   $('empty').hidden = rows.length > 0;
   $('empty').textContent = q ? 'No matches.' : 'Nothing here yet. Tap Add to save your first password.';
+  const gone = trashed().length;
+  $('trashOpen').hidden = !gone || !!q;
+  $('trashOpen').textContent = `Recently deleted (${gone})`;
+  if ($('trashDlg').open) renderTrash();
+  refreshHealth();
 }
 $('search').addEventListener('input', renderList);
 const wideScreen = () => matchMedia('(min-width: 761px) and (pointer: fine)').matches;
@@ -841,7 +879,6 @@ addEventListener('keydown', (ev) => {
 const FIELD_IDS = ['fTitle', 'fUser', 'fPass', 'fUrl', 'fNotes', 'fTotp'];
 const FIELD_OF = { need_title: 'fTitle', bad_title: 'fTitle', bad_username_field: 'fUser', need_password: 'fPass', bad_password: 'fPass', password_spaces: 'fPass', bad_url: 'fUrl', bad_notes: 'fNotes', bad_totp_secret: 'fTotp', totp_unsupported: 'fTotp' };
 let editingId = null;
-let deleteArmed = false;
 let fixing = false;
 
 function siteLink(url) {
@@ -871,10 +908,9 @@ function openItem(id, why = '') {
   $('fPass').type = 'password';
   $('fShow').textContent = 'Show';
   $('fDelete').hidden = !it;
-  $('fDelete').textContent = 'Delete';
+  $('fAge').textContent = it?.pwAt ? 'Password last changed ' + ago(it.pwAt) : '';
   $('itemMsg').textContent = '';
   for (const id of FIELD_IDS) $(id).classList.remove('bad');
-  deleteArmed = false;
   $('itemDlg').showModal();
   $('itemDlg').scrollTop = 0;
   if (why) $('fixBox').scrollIntoView({ block: 'start' });
@@ -948,28 +984,92 @@ $('itemForm').addEventListener('submit', async (ev) => {
   if (editingId) {
     const i = S.items.findIndex((x) => x.id === editingId);
     const { fav, totp, ...kept } = S.items[i]; // optional fields come only from the form
+    // The password's age restarts only when the password itself changes.
+    if (kept.password !== data.password) data.pwAt = data.updatedAt;
+    else breach.carry(editingId, kept.updatedAt, data.updatedAt);
     S.items[i] = { ...kept, ...data };
   } else {
-    S.items.push({ id: core.newId(), createdAt: Date.now(), ...data });
+    S.items.push({ id: core.newId(), createdAt: Date.now(), ...data, pwAt: data.updatedAt });
   }
   $('itemDlg').close();
   await persist();
-  if (fixing) {
-    $('healthOut').replaceChildren();
-    $('healthMsg').textContent = 'Saved. Run the check again to confirm it is fixed.';
-  }
+  if (fixing) $('healthMsg').textContent = 'Saved. Run the check again to confirm it is fixed.';
   toast('Saved');
 });
 
+// Delete moves the entry to Recently deleted, where it stays for 30 days, and offers Undo straight away.
 $('fDelete').addEventListener('click', async () => {
-  if (!deleteArmed) { deleteArmed = true; $('fDelete').textContent = 'Tap again to delete'; return; }
-  const i = S.items.findIndex((x) => x.id === editingId);
-  // Keep a tombstone (id and time only) so the deletion reaches other devices.
-  S.items[i] = { id: editingId, deleted: true, updatedAt: Date.now() };
+  const id = editingId;
+  const i = S.items.findIndex((x) => x.id === id);
+  if (i < 0) return;
+  const now = Date.now();
+  S.items[i] = { ...S.items[i], trashedAt: now, updatedAt: now };
   $('itemDlg').close();
   await persist();
-  toast('Deleted');
+  toast('Entry deleted', { label: 'Undo', run: () => restoreEntry(id) });
 });
+
+/* ---------- Recently deleted ---------- */
+
+async function restoreEntry(id) {
+  const i = S.items.findIndex((x) => x.id === id && !x.deleted && x.trashedAt);
+  if (i < 0 || !S.encKey) return;
+  const { trashedAt, ...kept } = S.items[i];
+  S.items[i] = { ...kept, updatedAt: Date.now() };
+  await persist();
+  toast('Restored');
+}
+// Removes entries for good. Only a marker (id and time) stays, so the removal reaches the other devices.
+async function eraseEntries(ids) {
+  const now = Date.now();
+  S.items = S.items.map((it) => (ids.includes(it.id) ? { id: it.id, deleted: true, updatedAt: now } : it));
+  await persist();
+}
+function armed(btn, label, run) {
+  btn.addEventListener('click', () => {
+    if (btn.dataset.armed) { delete btn.dataset.armed; btn.textContent = label; run(); return; }
+    btn.dataset.armed = '1';
+    btn.textContent = 'Tap again to confirm';
+    setTimeout(() => { if (btn.dataset.armed) { delete btn.dataset.armed; btn.textContent = label; } }, 4000);
+  });
+}
+function renderTrash() {
+  const rows = trashed();
+  const frag = document.createDocumentFragment();
+  for (const it of rows) {
+    const row = document.createElement('div');
+    row.className = 'trash-row';
+    const main = document.createElement('div');
+    main.className = 'log-main';
+    const name = document.createElement('strong');
+    name.textContent = it.title || '(no name)';
+    const sub = document.createElement('div');
+    sub.className = 'muted';
+    const left = core.trashDaysLeft(it);
+    sub.textContent = [it.username, left === 1 ? '1 day left' : `${left} days left`].filter(Boolean).join(' · ');
+    main.append(name, sub);
+    const back = document.createElement('button');
+    back.type = 'button';
+    back.className = 'btn small';
+    back.textContent = 'Restore';
+    back.setAttribute('aria-label', 'Restore ' + (it.title || 'entry'));
+    back.addEventListener('click', () => restoreEntry(it.id));
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'btn small danger';
+    del.textContent = 'Delete';
+    del.setAttribute('aria-label', 'Delete ' + (it.title || 'entry') + ' for good');
+    armed(del, 'Delete', async () => { await eraseEntries([it.id]); toast('Deleted for good'); });
+    row.append(main, back, del);
+    frag.append(row);
+  }
+  $('trashList').replaceChildren(frag);
+  $('trashEmpty').hidden = rows.length > 0;
+  $('trashEmptyBtn').hidden = rows.length === 0;
+}
+$('trashOpen').addEventListener('click', () => { renderTrash(); $('trashDlg').showModal(); });
+$('trashClose').addEventListener('click', () => $('trashDlg').close());
+armed($('trashEmptyBtn'), 'Delete all now', async () => { await eraseEntries(trashed().map((it) => it.id)); toast('Recently deleted is now empty'); });
 
 /* ---------- Generator ---------- */
 
@@ -1045,17 +1145,65 @@ function healthGroup(title, tone, note, rows) {
   return card;
 }
 
+// Results of the last breach check, kept on this device only: entry ids, how often each password was seen,
+// and when each entry was last edited at the time. No names and no passwords. Removed on sign out.
+const breach = {
+  read() {
+    try { const v = JSON.parse(localStorage.getItem('health') || 'null'); return v && typeof v.r === 'object' && v.r ? v : null; } catch { return null; }
+  },
+  write(v) { try { localStorage.setItem('health', JSON.stringify(v)); } catch { /* storage blocked */ } },
+  // An edit that leaves the password alone keeps its result.
+  carry(id, from, to) { const v = this.read(); if (v && Array.isArray(v.r[id]) && v.r[id][1] === from) { v.r[id][1] = to; this.write(v); } },
+  clear() { try { localStorage.removeItem('health'); } catch { /* storage blocked */ } },
+};
+
+function ago(t) {
+  const days = Math.floor((Date.now() - t) / 86400000);
+  if (days < 1) return 'today';
+  if (days < 60) return days === 1 ? 'yesterday' : `${days} days ago`;
+  if (days < 730) return `${Math.floor(days / 30)} months ago`;
+  return `${Math.floor(days / 365)} years ago`;
+}
+
+// Works out what needs attention from what is already on this device (nothing is sent anywhere),
+// updates the count on the Health tab and, when that tab is showing, the lists.
+function refreshHealth() {
+  if (!S.encKey) return;
+  const saved = breach.read();
+  const f = core.healthFindings(S.items, saved ? saved.r : {});
+  $('healthBadge').hidden = f.total === 0;
+  $('healthBadge').textContent = f.total > 99 ? '99+' : String(f.total);
+  $('healthBadge').setAttribute('aria-label', `${f.total} need attention`);
+  if ($('view-health').hidden || $('healthBtn').disabled) return;
+
+  $('healthSum').classList.toggle('clear', f.total === 0 && f.checked > 0);
+  $('healthSum').textContent = !f.checked ? '' : f.total ? `${f.total} of ${f.checked} entries need attention` : `No issues found in ${f.checked} entries`;
+  $('healthBtn').textContent = saved ? 'Check for breaches again' : 'Check for breaches';
+  $('healthNote').textContent = saved ? 'Breach check last run on this device ' + ago(saved.at) + '.' : 'Breach check not run on this device yet. Reused, weak and old passwords are found without it.';
+
+  const leaked = f.leaked.map(({ it, count }) => [it, `seen ${count.toLocaleString()} times in breaches`,
+    `This exact password appears ${count.toLocaleString()} times in leaked password lists, so attackers try it early. The lists hold passwords only and do not record which website or account they came from. It cannot be removed from those lists; changing it makes the leaked one useless.`]);
+  const reused = f.reused.flatMap((g) => g.map((it) => [it, `shared by ${g.length} entries`,
+    `This password is used by ${g.length} entries (${g.map((x) => x.title || 'no name').join(', ')}). If one of those sites is breached, the others are exposed too. Give each one its own password.`]));
+  const weak = f.weak.map((it) => [it, 'short or simple',
+    'This password is short or simple enough to be guessed quickly. Replace it with a generated one.']);
+  const old = f.old.map((it) => [it, 'changed ' + ago(it.pwAt),
+    `This password was last changed ${ago(it.pwAt)}. Age alone is not a fault, so there is no rush if it is strong and used only here. Change it if the account matters a lot or the site has had a breach.`]);
+  const groups = [];
+  if (saved) groups.push(healthGroup('Found in data breaches', 'bad', 'These exact passwords are in leaked password lists. Change them first, on every site where you use them.', leaked));
+  groups.push(
+    healthGroup('Reused', 'warn', 'The same password protects more than one account. Give each account its own.', reused),
+    healthGroup('Weak', 'warn', 'Short or simple passwords that are quick to guess.', weak),
+    healthGroup('Older than a year', 'warn', 'Passwords not changed for over a year. Imported entries are not listed until their password is changed here, because their age is unknown.', old),
+  );
+  $('healthOut').replaceChildren(...groups);
+}
+
 $('healthBtn').addEventListener('click', async () => {
   const btn = $('healthBtn');
   const msg = $('healthMsg');
   const items = live().filter((it) => it.password);
   btn.disabled = true;
-  $('healthOut').replaceChildren();
-
-  const reused = core.findReused(items).flatMap((g) => g.map((it) => [it, `shared by ${g.length} entries`,
-    `This password is used by ${g.length} entries (${g.map((x) => x.title || 'no name').join(', ')}). If one of those sites is breached, the others are exposed too. Give each one its own password.`]));
-  const weak = items.filter((it) => core.isWeak(it.password)).map((it) => [it, 'short or simple',
-    'This password is short or simple enough to be guessed quickly. Replace it with a generated one.']);
 
   // One lookup per distinct password, a few at a time.
   const unique = [...new Set(items.map((it) => it.password))];
@@ -1071,22 +1219,18 @@ $('healthBtn').addEventListener('click', async () => {
     }
   };
   await Promise.all([worker(), worker(), worker(), worker()]);
+  btn.disabled = false;
   if (!S.encKey) return;
 
-  const leaked = items.filter((it) => counts.get(it.password) > 0)
-    .map((it) => [it, `seen ${counts.get(it.password).toLocaleString()} times in breaches`,
-      `This exact password appears ${counts.get(it.password).toLocaleString()} times in leaked password lists, so attackers try it early. The lists hold passwords only and do not record which website or account they came from. It cannot be removed from those lists; changing it makes the leaked one useless.`]);
-  const out = $('healthOut');
-  if (failed) msg.textContent = 'Could not reach the leak check service. Reused and weak results are still shown. Try again when online.';
+  if (failed) msg.textContent = 'Could not reach the leak check service. Reused, weak and old results are still shown. Try again when online.';
   else {
-    msg.textContent = `Checked ${items.length} entries. ${leaked.length + reused.length + weak.length ? 'Tap Fix on each one below.' : 'All clear.'}`;
-    out.append(healthGroup('Found in data breaches', 'bad', 'These exact passwords are in leaked password lists. Change them first, on every site where you use them.', leaked));
+    const r = {};
+    for (const it of items) if (counts.get(it.password) > 0) r[it.id] = [counts.get(it.password), it.updatedAt];
+    breach.write({ at: Date.now(), r });
+    const total = core.healthFindings(S.items, r).total;
+    msg.textContent = `Checked ${items.length} entries. ${total ? 'Tap Fix on each one below.' : 'All clear.'}`;
   }
-  out.append(
-    healthGroup('Reused', 'warn', 'The same password protects more than one account. Give each account its own.', reused),
-    healthGroup('Weak', 'warn', 'Short or simple passwords that are quick to guess.', weak),
-  );
-  btn.disabled = false;
+  refreshHealth();
 });
 
 /* ---------- Settings ---------- */
@@ -1462,7 +1606,7 @@ $('importBtn').addEventListener('click', async () => {
     S.items = core.mergeItems(S.items, items);
     await persist();
     msg.className = 'msg ok';
-    msg.textContent = `Merged ${items.filter((it) => !it.deleted).length} entries from the backup.`;
+    msg.textContent = `Merged ${items.filter((it) => !it.deleted && !it.trashedAt).length} entries from the backup.`;
   } catch {
     msg.textContent = 'Could not open that backup. Check the file and the master password it was made with.';
   } finally {
@@ -1485,6 +1629,7 @@ $('signOutBtn').addEventListener('click', async () => {
   quick = null;
   trust = null;
   recents.clear();
+  breach.clear();
   await store.del('quick').catch(() => {});
   await store.del('trust').catch(() => {});
   await store.del('state');
