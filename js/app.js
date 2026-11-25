@@ -8,7 +8,7 @@ const API = 'api/index.php';
 // The page and this script are published together. Right after an update a browser can hold one of them from
 // before; the missing parts would then stop the app from starting. When they do not match, fetch fresh copies
 // and reload, once.
-const BUILD = '19';
+const BUILD = '20';
 {
   const page = document.querySelector('meta[name="vault-build"]');
   let tried = false;
@@ -296,6 +296,7 @@ async function unsyncedLocal(cached, username, vk) {
 
 async function unlock(username, password) {
   const cached = await store.get('state');
+  let stale = false; // the device copy opened with this password but the server refused it
   if (cached && cached.username === username) {
     // Known device: open the local encrypted copy first (works offline), then check in with the server.
     const keys = await core.deriveKeys(password, cached.salt, cached.kdf);
@@ -315,19 +316,24 @@ async function unlock(username, password) {
         recovery = r.recovery;
         totp = r.totp;
       } catch (e) {
-        if (e.message === 'bad_credentials') throw new Error('changed_elsewhere');
+        // The server refused the sign-in this device knows. The password may still be right: a change or a
+        // recovery on another device gives the account a new salt even when the same password is kept.
+        if (e.message === 'bad_credentials') local = null;
         if (e.message === 'device_revoked') throw e; // signed out remotely: the local copy is already erased
         if (e.message === 'totp_required' || e.message === 'bad_totp') throw e; // the server wants the authenticator code
         // offline or busy: carry on with the device copy
       }
-      S.totp = totp;
-      S.hash = cached.hash || '';
-      Object.assign(S, {
-        username, encKey: local.vk, auth: keys.auth, salt: cached.salt, kdf: cached.kdf, wrap, hasRecovery: recovery,
-        items: local.items, rev: cached.rev, dirty: !!cached.dirty,
-      });
-      await patchCache();
-      return;
+      if (local) {
+        S.totp = totp;
+        S.hash = cached.hash || '';
+        Object.assign(S, {
+          username, encKey: local.vk, auth: keys.auth, salt: cached.salt, kdf: cached.kdf, wrap, hasRecovery: recovery,
+          items: local.items, rev: cached.rev, dirty: !!cached.dirty,
+        });
+        await patchCache();
+        return;
+      }
+      stale = true;
     }
   }
   // New device, or the device copy did not open: fetch salt, derive keys, sign in, download and decrypt.
@@ -335,7 +341,9 @@ async function unlock(username, password) {
   try { pre = await api('prelogin', { username }); }
   catch (e) { throw cached && e.offline ? new Error('bad_credentials') : e; }
   const keys = await core.deriveKeys(password, pre.salt, pre.kdf);
-  const r = await signIn(username, keys);
+  let r;
+  try { r = await signIn(username, keys); }
+  catch (e) { throw stale && e.message === 'bad_credentials' ? new Error('changed_elsewhere') : e; }
   const vk = await core.importVaultKey(r.vkRaw);
   const v = await api('vault');
   const remote = await core.decryptVault(vk, username, v.blob);
