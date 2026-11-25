@@ -101,6 +101,8 @@ const ERRORS = {
   bad_totp: 'That code is not right, or it was already used. Wait for the next code and try again.',
   bad_secret: 'Could not set up the authenticator. Start the setup again.',
   totp_lost: 'This device needs your authenticator code again. Unlock with your master password.',
+  bad_totp_secret: 'That authenticator key is not valid. Paste the key the site shows during two-factor setup, or its otpauth:// link.',
+  totp_unsupported: 'That authenticator setup uses non-standard settings. Only 6-digit, 30-second codes are supported.',
   need_title: 'Give this entry a name.',
   bad_title: 'The name is too long or contains hidden characters. Retype it.',
   bad_username_field: 'A username or email cannot contain spaces, double quotes, angle brackets or hidden characters.',
@@ -491,7 +493,7 @@ function lock(message = '') {
   try { sessionStorage.removeItem('vaultOpen'); } catch { /* storage blocked */ }
   store.del('unlock').catch(() => {});
   if ($('itemDlg').open) $('itemDlg').close();
-  for (const id of ['fTitle', 'fUser', 'fPass', 'fUrl', 'fNotes', 'search', 'importPass', 'cpCur', 'cpNew', 'cpNew2', 'recPass', 'qPass', 'qPin', 'qPin2', 'tfaPass', 'tfaCode']) $(id).value = '';
+  for (const id of ['fTitle', 'fUser', 'fPass', 'fUrl', 'fNotes', 'fTotp', 'search', 'importPass', 'cpCur', 'cpNew', 'cpNew2', 'recPass', 'qPass', 'qPin', 'qPin2', 'tfaPass', 'tfaCode']) $(id).value = '';
   $('tfaSetup').hidden = true;
   tfaPending = null;
   for (const id of ['healthMsg', 'cpMsg', 'recMsg', 'recCode', 'pinMsg', 'bioMsg', 'csvMsg', 'tfaMsg', 'tfaKey']) $(id).textContent = '';
@@ -725,60 +727,119 @@ setInterval(() => { if (S.encKey && !document.hidden) sync(); }, 60000);
 
 function showView(name) {
   for (const v of ['vault', 'generator', 'health', 'settings']) $('view-' + v).hidden = v !== name;
+  if (name === 'vault' && wideScreen() && !$('itemDlg').open) setTimeout(() => $('search').focus(), 0);
   for (const t of document.querySelectorAll('.tab')) t.classList.toggle('active', t.dataset.view === name);
 }
 for (const t of document.querySelectorAll('.tab')) t.addEventListener('click', () => { showView(t.dataset.view); if (t.dataset.view === 'settings') loadLog(); });
 
 const live = () => S.items.filter((it) => !it.deleted);
 
+// Which entries were used last on this device. Only ids and times are kept, never names or passwords,
+// and it stays on the device so that using an entry does not rewrite the vault.
+const recents = {
+  read() { try { return JSON.parse(localStorage.getItem('recent') || '{}') || {}; } catch { return {}; } },
+  touch(id) {
+    if (!id) return;
+    const all = this.read();
+    all[id] = Date.now();
+    const keep = Object.entries(all).sort((x, y) => y[1] - x[1]).slice(0, 30);
+    try { localStorage.setItem('recent', JSON.stringify(Object.fromEntries(keep))); } catch { /* storage blocked */ }
+  },
+  clear() { try { localStorage.removeItem('recent'); } catch { /* storage blocked */ } },
+};
+
+const ICON = {
+  user: 'M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4.500 20a7.500 7.500 0 0 1 15 0',
+  key: 'M15 9a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM12 12v8M12 16h3M12 20h2',
+};
+function iconButton(kind, label, onClick) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'row-btn';
+  b.setAttribute('aria-label', label);
+  b.title = label;
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('aria-hidden', 'true');
+  const path = document.createElementNS(NS, 'path');
+  path.setAttribute('d', ICON[kind]);
+  svg.append(path);
+  b.append(svg);
+  b.addEventListener('click', onClick);
+  return b;
+}
+
+function entryRow(it) {
+  const li = document.createElement('li');
+  li.className = 'item';
+  const main = document.createElement('button');
+  main.type = 'button';
+  main.className = 'item-main';
+  const av = document.createElement('span');
+  const name = it.title || '?';
+  av.className = 'avatar av' + ([...name.toLowerCase()].reduce((n, c) => (n * 31 + c.codePointAt(0)) >>> 0, 7) % 6);
+  av.textContent = [...name][0];
+  av.setAttribute('aria-hidden', 'true');
+  const text = document.createElement('span');
+  text.className = 'item-text';
+  const t = document.createElement('div');
+  t.className = 'item-title';
+  t.textContent = it.title || '(no name)';
+  const s = document.createElement('div');
+  s.className = 'item-sub';
+  s.textContent = it.username || (it.url || '').replace(/^https?:\/\//, '').replace(/\/$/, '') || '';
+  text.append(t, s);
+  main.append(av, text);
+  main.addEventListener('click', () => openItem(it.id));
+  li.append(main);
+  const what = it.title || 'entry';
+  if (it.username) {
+    li.append(iconButton('user', 'Copy username for ' + what, () => { recents.touch(it.id); copy(it.username, 'Username copied'); }));
+  }
+  li.append(iconButton('key', 'Copy password for ' + what, () => { recents.touch(it.id); copy(it.password, 'Password copied'); }));
+  return li;
+}
+
 function renderList() {
   if (!S.encKey) return;
   const q = $('search').value.trim().toLowerCase();
-  const rows = live()
-    .filter((it) => !q || [it.title, it.username, it.url].some((f) => (f || '').toLowerCase().includes(q)))
-    .sort((a, b) => (a.title || '').localeCompare(b.title || '', undefined, { sensitivity: 'base' }));
+  const rows = live().filter((it) => !q || [it.title, it.username, it.url].some((f) => (f || '').toLowerCase().includes(q)));
+  // While searching, show one flat list of matches. Otherwise group: favourites, recently used, the rest.
+  const groups = q
+    ? [{ label: '', items: rows.sort((a, b) => (a.title || '').localeCompare(b.title || '', undefined, { sensitivity: 'base' })) }].filter((g) => g.items.length)
+    : core.groupForList(rows, recents.read());
   const frag = document.createDocumentFragment();
-  for (const it of rows) {
-    const li = document.createElement('li');
-    li.className = 'item';
-    const main = document.createElement('button');
-    main.type = 'button';
-    main.className = 'item-main';
-    const av = document.createElement('span');
-    const name = it.title || '?';
-    av.className = 'avatar av' + ([...name.toLowerCase()].reduce((n, c) => (n * 31 + c.codePointAt(0)) >>> 0, 7) % 6);
-    av.textContent = [...name][0];
-    av.setAttribute('aria-hidden', 'true');
-    const text = document.createElement('span');
-    text.className = 'item-text';
-    const t = document.createElement('div');
-    t.className = 'item-title';
-    t.textContent = it.title || '(no name)';
-    const s = document.createElement('div');
-    s.className = 'item-sub';
-    s.textContent = it.username || (it.url || '').replace(/^https?:\/\//, '').replace(/\/$/, '') || '';
-    text.append(t, s);
-    main.append(av, text);
-    main.addEventListener('click', () => openItem(it.id));
-    const cp = document.createElement('button');
-    cp.type = 'button';
-    cp.className = 'btn small';
-    cp.textContent = 'Copy';
-    cp.setAttribute('aria-label', 'Copy password for ' + (it.title || 'entry'));
-    cp.addEventListener('click', () => copy(it.password, 'Password copied'));
-    li.append(main, cp);
-    frag.append(li);
+  for (const g of groups) {
+    if (g.label) {
+      const h = document.createElement('h3');
+      h.className = 'list-head';
+      h.textContent = g.label;
+      frag.append(h);
+    }
+    const ul = document.createElement('ul');
+    ul.className = 'list';
+    for (const it of g.items) ul.append(entryRow(it));
+    frag.append(ul);
   }
   $('list').replaceChildren(frag);
   $('empty').hidden = rows.length > 0;
   $('empty').textContent = q ? 'No matches.' : 'Nothing here yet. Tap Add to save your first password.';
 }
 $('search').addEventListener('input', renderList);
+const wideScreen = () => matchMedia('(min-width: 761px) and (pointer: fine)').matches;
+addEventListener('keydown', (ev) => {
+  // "/" jumps to search from anywhere in the app, as long as nothing is being typed
+  if (ev.key !== '/' || !S.encKey || $('itemDlg').open || /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName)) return;
+  ev.preventDefault();
+  showView('vault');
+  $('search').focus();
+});
 
 /* ---------- Entry editor ---------- */
 
-const FIELD_IDS = ['fTitle', 'fUser', 'fPass', 'fUrl', 'fNotes'];
-const FIELD_OF = { need_title: 'fTitle', bad_title: 'fTitle', bad_username_field: 'fUser', need_password: 'fPass', bad_password: 'fPass', password_spaces: 'fPass', bad_url: 'fUrl', bad_notes: 'fNotes' };
+const FIELD_IDS = ['fTitle', 'fUser', 'fPass', 'fUrl', 'fNotes', 'fTotp'];
+const FIELD_OF = { need_title: 'fTitle', bad_title: 'fTitle', bad_username_field: 'fUser', need_password: 'fPass', bad_password: 'fPass', password_spaces: 'fPass', bad_url: 'fUrl', bad_notes: 'fNotes', bad_totp_secret: 'fTotp', totp_unsupported: 'fTotp' };
 let editingId = null;
 let deleteArmed = false;
 let fixing = false;
@@ -803,6 +864,10 @@ function openItem(id, why = '') {
   $('fPass').value = it?.password || '';
   $('fUrl').value = it?.url || '';
   $('fNotes').value = it?.notes || '';
+  $('fTotp').value = it?.totp || '';
+  $('fFav').checked = !!it?.fav;
+  refreshGo();
+  startCode();
   $('fPass').type = 'password';
   $('fShow').textContent = 'Show';
   $('fDelete').hidden = !it;
@@ -817,8 +882,40 @@ function openItem(id, why = '') {
 
 $('addBtn').addEventListener('click', () => openItem(null));
 $('fCancel').addEventListener('click', () => $('itemDlg').close());
-$('fUserCopy').addEventListener('click', () => copy($('fUser').value, 'Username copied'));
-$('fPassCopy').addEventListener('click', () => copy($('fPass').value, 'Password copied'));
+$('fUserCopy').addEventListener('click', () => { recents.touch(editingId); copy($('fUser').value, 'Username copied'); });
+$('fPassCopy').addEventListener('click', () => { recents.touch(editingId); copy($('fPass').value, 'Password copied'); });
+
+// "Copy password and open website": the link itself opens the site, the click also copies.
+function refreshGo() {
+  const link = siteLink($('fUrl').value);
+  $('fGo').hidden = !link || !$('fPass').value;
+  if (link) $('fGo').href = link; else $('fGo').removeAttribute('href');
+}
+$('fUrl').addEventListener('input', refreshGo);
+$('fPass').addEventListener('input', refreshGo);
+$('fGo').addEventListener('click', () => { recents.touch(editingId); copy($('fPass').value, 'Password copied. Opening the site'); });
+
+// Live authenticator code for the key in the field, refreshed every second while the editor is open.
+let codeTimer = null;
+async function showCode() {
+  let key = '';
+  try { key = core.normalizeTotp($('fTotp').value); } catch { /* not a usable key yet */ }
+  if (!key || !$('itemDlg').open) { $('codeBox').hidden = true; $('codeNow').textContent = ''; return; }
+  const { code, left } = await core.totpNow(key);
+  $('codeNow').textContent = code.slice(0, 3) + ' ' + code.slice(3);
+  $('codeLeft').textContent = `changes in ${left}s`;
+  $('codeBox').hidden = false;
+}
+function startCode() {
+  clearInterval(codeTimer);
+  codeTimer = setInterval(showCode, 1000);
+  setTimeout(showCode, 0);
+}
+$('fTotp').addEventListener('input', showCode);
+// A field marked as wrong goes back to normal as soon as it is edited.
+for (const id of FIELD_IDS) $(id).addEventListener('input', () => $(id).classList.remove('bad'));
+$('codeCopy').addEventListener('click', () => { recents.touch(editingId); copy($('codeNow').textContent.replace(/\s/g, ''), 'Code copied'); });
+$('itemDlg').addEventListener('close', () => { clearInterval(codeTimer); $('codeBox').hidden = true; $('codeNow').textContent = ''; $('fTotp').value = ''; });
 $('fShow').addEventListener('click', () => {
   const show = $('fPass').type === 'password';
   $('fPass').type = show ? 'text' : 'password';
@@ -837,6 +934,7 @@ $('itemForm').addEventListener('submit', async (ev) => {
   try {
     clean = core.validateEntry({
       title: $('fTitle').value, username: $('fUser').value, password: $('fPass').value, url: $('fUrl').value, notes: $('fNotes').value,
+      totp: $('fTotp').value,
     });
   } catch (e) {
     $('itemMsg').textContent = explain(e);
@@ -846,9 +944,11 @@ $('itemForm').addEventListener('submit', async (ev) => {
     return;
   }
   const data = { ...clean, updatedAt: Date.now(), deleted: false };
+  if ($('fFav').checked) data.fav = true;
   if (editingId) {
     const i = S.items.findIndex((x) => x.id === editingId);
-    S.items[i] = { ...S.items[i], ...data };
+    const { fav, totp, ...kept } = S.items[i]; // optional fields come only from the form
+    S.items[i] = { ...kept, ...data };
   } else {
     S.items.push({ id: core.newId(), createdAt: Date.now(), ...data });
   }
@@ -1384,6 +1484,7 @@ $('signOutBtn').addEventListener('click', async () => {
   try { await api('logout', {}); } catch { /* offline is fine */ }
   quick = null;
   trust = null;
+  recents.clear();
   await store.del('quick').catch(() => {});
   await store.del('trust').catch(() => {});
   await store.del('state');

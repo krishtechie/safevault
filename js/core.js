@@ -200,6 +200,72 @@ export async function decryptVault(encKey, username, blob) {
   return sanitizeItems(data.items);
 }
 
+/* ---------- Authenticator codes stored in entries (TOTP, RFC 6238) ---------- */
+
+const B32_STD = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+
+// Accepts the key a website shows during two-factor setup, or the otpauth:// link behind its QR code.
+// Returns the bare key in upper case, or '' for empty input.
+export function normalizeTotp(input) {
+  const raw = String(input ?? '').trim();
+  if (!raw) return '';
+  let key = raw;
+  if (/^otpauth:/i.test(raw)) {
+    if (!/^otpauth:\/\/totp\//i.test(raw)) throw new Error('totp_unsupported');
+    const param = (name) => {
+      const m = raw.match(new RegExp('[?&]' + name + '=([^&#]*)', 'i'));
+      return m ? decodeURIComponent(m[1]) : '';
+    };
+    key = param('secret');
+    // Only the settings nearly every site uses are supported: SHA-1, 6 digits, 30 seconds.
+    if ((param('algorithm') || 'SHA1').toUpperCase() !== 'SHA1' || (param('digits') || '6') !== '6' || (param('period') || '30') !== '30') {
+      throw new Error('totp_unsupported');
+    }
+  }
+  key = key.replace(/[\s-]/g, '').replace(/=+$/, '').toUpperCase();
+  if (!/^[A-Z2-7]{16,128}$/.test(key)) throw new Error('bad_totp_secret');
+  return key;
+}
+
+function b32Bytes(key) {
+  let bits = '';
+  for (const c of key) bits += B32_STD.indexOf(c).toString(2).padStart(5, '0');
+  const out = new Uint8Array(Math.floor(bits.length / 8));
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(bits.slice(i * 8, i * 8 + 8), 2);
+  return out;
+}
+
+// The current 6-digit code and how many seconds it stays valid.
+export async function totpNow(key, nowMs = Date.now()) {
+  const step = Math.floor(nowMs / 30000);
+  const msg = new Uint8Array(8);
+  new DataView(msg.buffer).setUint32(4, step >>> 0);
+  new DataView(msg.buffer).setUint32(0, Math.floor(step / 0x100000000));
+  const k = await crypto.subtle.importKey('raw', b32Bytes(normalizeTotp(key)), { name: 'HMAC', hash: 'SHA-1' }, false, ['sign']);
+  const h = new Uint8Array(await crypto.subtle.sign('HMAC', k, msg));
+  const o = h[19] & 0x0f;
+  const n = (((h[o] & 0x7f) << 24) | (h[o + 1] << 16) | (h[o + 2] << 8) | h[o + 3]) % 1000000;
+  return { code: String(n).padStart(6, '0'), left: 30 - Math.floor((nowMs / 1000) % 30) };
+}
+
+/* ---------- List order ---------- */
+
+// Favourites first, then the entries used most recently on this device, then everything else by name.
+// recents maps entry id to the time it was last used here. Returns [{ label, items }] with empty groups left out.
+export function groupForList(items, recents = {}, maxRecent = 5) {
+  const byName = (a, b) => (a.title || '').localeCompare(b.title || '', undefined, { sensitivity: 'base' });
+  const favs = items.filter((it) => it.fav).sort(byName);
+  const rest = items.filter((it) => !it.fav);
+  const recent = rest.filter((it) => recents[it.id] > 0).sort((a, b) => recents[b.id] - recents[a.id]).slice(0, maxRecent);
+  const inRecent = new Set(recent.map((it) => it.id));
+  const others = rest.filter((it) => !inRecent.has(it.id)).sort(byName);
+  return [
+    { label: 'Favourites', items: favs },
+    { label: 'Recently used', items: recent },
+    { label: favs.length || recent.length ? 'All passwords' : '', items: others },
+  ].filter((g) => g.items.length);
+}
+
 /* ---------- Field rules ---------- */
 
 // Characters that never belong in a credential: control codes, zero-width characters and
@@ -234,7 +300,10 @@ export function validateEntry(d) {
   if (password.length > LIMITS.password || hidden(password)) throw new Error('bad_password');
   if (password !== password.trim()) throw new Error('password_spaces');
   if (notes.length > LIMITS.notes || hiddenNotes(notes)) throw new Error('bad_notes');
-  return { title, username, password, url: normalizeUrl(d.url), notes };
+  const out = { title, username, password, url: normalizeUrl(d.url), notes };
+  const totp = normalizeTotp(d.totp);
+  if (totp) out.totp = totp;
+  return out;
 }
 
 // Everything read from the server, the device copy or a backup file passes through here:
@@ -250,7 +319,7 @@ export function sanitizeItems(items) {
     if (it.deleted === true) { out.push({ id: it.id, deleted: true, updatedAt: time(it.updatedAt) }); continue; }
     let url = '';
     try { url = normalizeUrl(it.url); } catch { /* blank it */ }
-    out.push({
+    const clean = {
       id: it.id,
       title: text(it.title, LIMITS.title).trim(),
       username: text(it.username, LIMITS.username).trim(),
@@ -260,7 +329,11 @@ export function sanitizeItems(items) {
       createdAt: time(it.createdAt),
       updatedAt: time(it.updatedAt),
       deleted: false,
-    });
+    };
+    // Optional fields are present only when set, so older entries keep their exact shape.
+    if (it.fav === true) clean.fav = true;
+    try { const key = normalizeTotp(it.totp); if (key) clean.totp = key; } catch { /* drop an unusable key */ }
+    out.push(clean);
   }
   return out;
 }
@@ -487,6 +560,7 @@ const CSV_COLUMNS = {
   username: ['username', 'login_username', 'user name', 'login', 'email', 'user', 'login name'],
   password: ['password', 'login_password', 'pass'],
   notes: ['note', 'notes', 'extra', 'comment', 'comments'],
+  totp: ['login_totp', 'otpauth', 'totp', 'otp', 'one-time password'],
 };
 
 // Turns an export file into entries. existing = entries already in the vault, used to skip duplicates.
@@ -517,7 +591,7 @@ export function importCsv(text, existing = []) {
     if (!title) title = get('username').trim() || 'Imported entry';
     // sanitizeItems applies the same cleaning as every other data source.
     const [clean] = sanitizeItems([{
-      id: newId(), title, username: get('username'), password, url, notes: get('notes'), createdAt: now, updatedAt: now,
+      id: newId(), title, username: get('username'), password, url, notes: get('notes'), totp: get('totp'), createdAt: now, updatedAt: now,
     }]);
     if (!clean.password) { skipped.push({ line: n + 2, reason: 'no usable password' }); return; }
     const key = keyOf(clean);

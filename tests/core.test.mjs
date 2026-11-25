@@ -316,3 +316,54 @@ test('two-factor setup: secret format and authenticator link', () => {
   assert.equal(core.otpauthUri('JBSWY3DPEHPK3PXP', 'me@x'), 'otpauth://totp/Vault:me%40x?secret=JBSWY3DPEHPK3PXP&issuer=Vault&algorithm=SHA1&digits=6&period=30');
   for (const k of ['totp_on', 'totp_off', 'totp_fail', 'device_trusted', 'restore', 'rollback_seen']) assert.ok(core.LOG_EVENTS[k]);
 });
+
+test('authenticator codes in entries: key formats and the RFC 6238 reference values', async () => {
+  const KEY = 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ'; // "12345678901234567890"
+  assert.equal(core.normalizeTotp(''), '');
+  assert.equal(core.normalizeTotp(' gezd gnbv-gy3t qojq gezd gnbv gy3t qojq== '), KEY);
+  assert.equal(core.normalizeTotp('otpauth://totp/Example:me%40x.com?secret=' + KEY.toLowerCase() + '&issuer=Example'), KEY);
+  assert.equal(core.normalizeTotp('otpauth://totp/x?issuer=A&secret=' + KEY + '&algorithm=SHA1&digits=6&period=30'), KEY);
+  for (const bad of ['short', 'not base32 !!!!!!!!!!!!', '1111111111111111', 'otpauth://totp/x?issuer=A']) assert.throws(() => core.normalizeTotp(bad), { message: 'bad_totp_secret' });
+  for (const odd of ['otpauth://hotp/x?secret=' + KEY, 'otpauth://totp/x?secret=' + KEY + '&digits=8', 'otpauth://totp/x?secret=' + KEY + '&period=60', 'otpauth://totp/x?secret=' + KEY + '&algorithm=SHA256']) assert.throws(() => core.normalizeTotp(odd), { message: 'totp_unsupported' });
+  // RFC 6238 appendix B (SHA-1), last six digits of each published value
+  for (const [t, code] of [[59, '287082'], [1111111109, '081804'], [1111111111, '050471'], [1234567890, '005924'], [2000000000, '279037'], [20000000000, '353130']]) {
+    assert.equal((await core.totpNow(KEY, t * 1000)).code, code);
+  }
+  assert.equal((await core.totpNow(KEY, 59 * 1000)).left, 1);
+  assert.equal((await core.totpNow(KEY, 60 * 1000)).left, 30);
+  await assert.rejects(core.totpNow('nonsense'));
+});
+
+test('entries keep favourite and authenticator key through cleaning, and old entries keep their shape', () => {
+  const KEY = 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ';
+  const [a, b, c] = core.sanitizeItems([
+    { id: 'a', title: 'A', password: 'p', fav: true, totp: KEY.toLowerCase(), updatedAt: 1 },
+    { id: 'b', title: 'B', password: 'p', fav: 'yes', totp: '<script>', updatedAt: 1 },
+    { id: 'c', title: 'C', password: 'p', updatedAt: 1 },
+  ]);
+  assert.equal(a.fav, true); assert.equal(a.totp, KEY);
+  assert.ok(!('fav' in b) && !('totp' in b));
+  assert.deepEqual(Object.keys(c), ['id', 'title', 'username', 'password', 'url', 'notes', 'createdAt', 'updatedAt', 'deleted']);
+  const ok = { title: 'T', username: 'u', password: 'pw', url: '', notes: '' };
+  assert.equal(core.validateEntry({ ...ok, totp: 'gezd gnbv gy3t qojq' }).totp, 'GEZDGNBVGY3TQOJQ');
+  assert.ok(!('totp' in core.validateEntry({ ...ok, totp: '  ' })));
+  assert.throws(() => core.validateEntry({ ...ok, totp: 'abc' }), { message: 'bad_totp_secret' });
+  const csv = 'name,url,username,password,note,otpauth\nSite,https://s.test,u,pw,,otpauth://totp/Site:u?secret=' + KEY + '\nOther,https://o.test,u,pw2,,garbage\n';
+  const r = core.importCsv(csv);
+  assert.equal(r.items[0].totp, KEY); assert.ok(!('totp' in r.items[1])); assert.equal(r.items.length, 2);
+});
+
+test('list order: favourites, then recently used on this device, then the rest by name', () => {
+  const items = ['delta', 'Alpha', 'charlie', 'Bravo', 'echo', 'foxtrot'].map((t, i) => ({ id: 'i' + i, title: t }));
+  items[4].fav = true; items[1].fav = true; // echo, Alpha
+  const shape = (g) => g.map((x) => [x.label, x.items.map((i) => i.title)]);
+  assert.deepEqual(shape(core.groupForList(items, { i0: 50, i3: 90, i4: 99, gone: 5 })), [
+    ['Favourites', ['Alpha', 'echo']],
+    ['Recently used', ['Bravo', 'delta']],
+    ['All passwords', ['charlie', 'foxtrot']],
+  ]);
+  assert.deepEqual(shape(core.groupForList(items.filter((i) => !i.fav))), [['', ['Bravo', 'charlie', 'delta', 'foxtrot']]]);
+  assert.deepEqual(shape(core.groupForList(items.filter((i) => !i.fav), { i0: 1, i2: 2, i3: 3, i5: 4 }, 2)), [['Recently used', ['foxtrot', 'Bravo']], ['All passwords', ['charlie', 'delta']]]);
+  assert.deepEqual(core.groupForList([]), []);
+  const flat = core.groupForList(items, { i0: 1 }).flatMap((g) => g.items); assert.equal(new Set(flat).size, items.length); // every entry appears exactly once
+});

@@ -93,7 +93,7 @@
         <input id="search" type="search" placeholder="Search passwords" autocomplete="off">
         <button id="addBtn" class="btn primary" type="button">Add</button>
       </div>
-      <ul id="list" class="list"></ul>
+      <div id="list" class="lists"></div>
       <p id="empty" class="muted center" hidden>Nothing here yet. Tap Add to save your first password.</p>
     </section>
 
@@ -338,6 +338,18 @@
     <label>Website
       <input id="fUrl" type="url" inputmode="url" maxlength="2048" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="https://">
     </label>
+    <a id="fGo" class="link" target="_blank" rel="noopener noreferrer" hidden>Copy password and open website</a>
+    <label>Authenticator key (optional)
+      <input id="fTotp" type="text" maxlength="600" autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" placeholder="Key or otpauth:// link from the site">
+    </label>
+    <div id="codeBox" class="code-box" hidden>
+      <div>
+        <output id="codeNow" class="code-now"></output>
+        <span id="codeLeft" class="muted"></span>
+      </div>
+      <button id="codeCopy" class="btn small" type="button">Copy code</button>
+    </div>
+    <label class="check"><input id="fFav" type="checkbox"> Favourite</label>
     <label>Notes
       <textarea id="fNotes" rows="3" maxlength="5000" autocomplete="off"></textarea>
     </label>
