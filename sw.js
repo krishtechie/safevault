@@ -1,9 +1,9 @@
 // Offline support for the app shell only. API calls are never cached or intercepted.
-const CACHE = 'vault-shell-v16';
+const CACHE = 'vault-shell-v17';
 const SHELL = [
   './', 'index.html', 'style.css', 'js/app.js', 'js/core.js',
   'vendor/argon2.umd.min.js', 'vendor/qrcode.js', 'vendor/wordlist.js',
-  'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png',
+  'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/logo.svg', 'icons/wordmark.svg',
 ];
 
 self.addEventListener('install', (e) => {

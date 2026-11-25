@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="vault-build" content="16">
+<meta name="vault-build" content="17">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://api.pwnedpasswords.com; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
@@ -15,7 +15,8 @@
 <meta name="format-detection" content="telephone=no">
 <title>Vault</title>
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="icon" href="icons/icon-192.png">
+<link rel="icon" href="icons/logo.svg" type="image/svg+xml">
+<link rel="alternate icon" href="icons/icon-192.png">
 <link rel="apple-touch-icon" href="icons/icon-192.png">
 <link rel="stylesheet" href="style.css">
 </head>
@@ -24,8 +25,9 @@
 <!-- Unlock / create account -->
 <main id="auth" class="auth">
   <form id="authForm" class="card auth-card" autocomplete="off" novalidate>
-    <img class="mark" src="icons/icon-192.png" alt="" width="64" height="64">
-    <h1>Vault</h1>
+    <img class="mark" src="icons/logo.svg" alt="" width="72" height="72">
+    <h1 class="wordmark"><span class="sr">Vault</span></h1>
+    <svg class="tagline" viewBox="0 0 168 14" role="img" aria-label="Password manager"><text x="0" y="11" textLength="168" lengthAdjust="spacing">PASSWORD MANAGER</text></svg>
     <p id="authLead" class="muted">Unlock with your master password.</p>
 
     <label id="userField">Username
@@ -63,7 +65,7 @@
 <!-- App -->
 <div id="app" class="app" hidden>
   <nav class="side">
-    <div class="brand"><img src="icons/icon-192.png" alt="" width="28" height="28"><span>Vault</span></div>
+    <div class="brand"><img src="icons/logo.svg" alt="" width="30" height="30"><span class="wordmark" role="img" aria-label="Vault"></span></div>
     <div class="tabs">
       <button class="tab active" data-view="vault" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="10" width="16" height="11" rx="3"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg><span>Passwords</span></button>
       <button class="tab" data-view="generator" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 0 1 13.700-5.600L20 8"/><path d="M20 4v4h-4"/><path d="M20 12a8 8 0 0 1-13.700 5.600L4 16"/><path d="M4 20v-4h4"/></svg><span>Generator</span></button>

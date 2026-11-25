@@ -8,7 +8,7 @@ const API = 'api/index.php';
 // The page and this script are published together. Right after an update a browser can hold one of them from
 // before; the missing parts would then stop the app from starting. When they do not match, fetch fresh copies
 // and reload, once.
-const BUILD = '16';
+const BUILD = '17';
 {
   const page = document.querySelector('meta[name="vault-build"]');
   let tried = false;
