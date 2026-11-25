@@ -275,27 +275,31 @@ function alert_html(string $title, string $tone, array $rows, string $foot, ?str
     $tbl = 'role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"';
     $account = (string)($rows['Account'] ?? '');
     unset($rows['Account']);
-    // Logo: the app icon from the vault's own address. If the mail app blocks images, the blue tile behind it still shows.
-    $logo = $link === null ? "<span style=\"{$font}font-size:20px;line-height:40px;font-weight:700;color:#ffffff;\">V</span>"
-        : "<img src=\"" . $e(rtrim($link, '/') . '/icons/icon-192.png') . "\" width=\"40\" height=\"40\" alt=\"\" style=\"display:block;border:0;border-radius:10px;\">";
-    // The VAULT lettering as an image when there is an address to load it from; plain spaced capitals otherwise,
-    // which is also what shows while a mail app is still hiding images.
+    $logo = "<span style=\"{$font}font-size:20px;line-height:40px;font-weight:700;color:#ffffff;\">V</span>";
     $wordText = "{$font}font-size:24px;line-height:26px;font-weight:800;letter-spacing:8.8px;color:#ffffff;";
-    // As one image, the lettering and the line under it share exactly the same width and line up with the icon.
-    $word = $link === null ? "<div style=\"$wordText\">VAULT</div><div style=\"{$font}font-size:9px;line-height:14px;font-weight:600;letter-spacing:1px;color:#a9b6d3;padding-top:3px;\">PASSWORD MANAGER</div>"
-        : "<img src=\"" . $e(rtrim($link, '/') . '/icons/lockup-email.png') . "\" width=\"132\" height=\"40\" alt=\"VAULT\" style=\"display:block;border:0;$wordText\">";
+    $word = "<div style=\"$wordText\">VAULT</div><div style=\"{$font}font-size:9px;line-height:14px;font-weight:600;letter-spacing:1px;color:#a9b6d3;padding-top:3px;\">PASSWORD MANAGER</div>";
+    // Header. With a site address it is one picture (navy band, icon, lettering), because mail apps in dark mode
+    // recolour backgrounds and text but leave pictures alone, so the brand stays as designed in light and dark.
+    // Without an address the same header is built from plain cells and text.
+    if ($link !== null) {
+        $header = "<tr><td bgcolor=\"#0a1433\" style=\"background:#0a1433;border-radius:18px 18px 0 0;padding:0;\">"
+            . "<img src=\"" . $e(rtrim($link, '/') . '/icons/email-header.png') . "\" width=\"500\" alt=\"VAULT Password Manager\" "
+            . "style=\"display:block;width:100%;max-width:500px;height:auto;border:0;border-radius:18px 18px 0 0;{$font}font-size:20px;line-height:80px;font-weight:800;letter-spacing:3px;color:#ffffff;text-align:center;\"></td></tr>\r\n";
+    } else {
+        $header = "<tr><td bgcolor=\"#0a1433\" style=\"background:#0a1433;border-radius:18px 18px 0 0;padding:18px 22px;\">\r\n"
+            . "<table $tbl><tr>"
+            . "<td width=\"40\" height=\"40\" align=\"center\" valign=\"middle\" bgcolor=\"#1f5fe0\" style=\"background:#1f5fe0;border-radius:10px;\">$logo</td>"
+            . "\r\n<td valign=\"middle\" style=\"padding-left:14px;\">$word</td>\r\n"
+            . "\r\n<td valign=\"middle\" align=\"right\" style=\"{$font}font-size:12px;line-height:16px;color:#a9b6d3;\">Security notice</td>\r\n"
+            . "</tr></table></td></tr>\r\n";
+    }
     $out = "<!doctype html>\r\n<html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
         . "<meta name=\"color-scheme\" content=\"light\"><title>" . $e($title) . "</title></head>\r\n"
         . "<body style=\"margin:0;padding:0;background:#eef1f6;\">\r\n"
         . "<table $tbl style=\"background:#eef1f6;\"><tr><td align=\"center\" style=\"padding:26px 12px;\">\r\n"
         . "<table $tbl style=\"max-width:500px;\">\r\n"
         // header
-        . "<tr><td bgcolor=\"#0a1433\" style=\"background:#0a1433;border-radius:18px 18px 0 0;padding:18px 22px;\">\r\n"
-        . "<table $tbl><tr>"
-        . "<td width=\"40\" height=\"40\" align=\"center\" valign=\"middle\" bgcolor=\"#1f5fe0\" style=\"background:#1f5fe0;border-radius:10px;\">$logo</td>"
-        . "\r\n<td valign=\"middle\" style=\"padding-left:14px;\">$word</td>\r\n"
-        . "\r\n<td valign=\"middle\" align=\"right\" style=\"{$font}font-size:12px;line-height:16px;color:#a9b6d3;\">Security notice</td>\r\n"
-        . "</tr></table></td></tr>\r\n"
+        . $header
         // colour bar
         . "<tr><td height=\"5\" bgcolor=\"$colour\" style=\"background:$colour;font-size:0;line-height:0;\">&nbsp;</td></tr>\r\n"
         // body
@@ -320,8 +324,9 @@ function alert_html(string $title, string $tone, array $rows, string $foot, ?str
     $out .= "</table></td></tr>\r\n"
         . "<tr><td style=\"{$font}font-size:14px;line-height:21px;color:#3d4b5f;padding:18px 22px 0;\">" . $e($foot) . "</td></tr>\r\n";
     if ($link !== null) {
-        $out .= "<tr><td style=\"padding:18px 22px 0;\"><a href=\"" . $e($link) . "\" style=\"{$font}display:inline-block;font-size:15px;line-height:20px;font-weight:600;"
-            . "color:#ffffff;background:#1f5fe0;border-radius:999px;padding:12px 26px;text-decoration:none;\">Open Vault</a></td></tr>\r\n"
+        $out .= "<tr><td style=\"padding:18px 22px 0;\"><a href=\"" . $e($link) . "\" style=\"text-decoration:none;\">"
+            . "<img src=\"" . $e(rtrim($link, '/') . '/icons/email-button.png') . "\" width=\"150\" height=\"44\" alt=\"Open Vault\" "
+            . "style=\"display:block;border:0;{$font}font-size:15px;line-height:44px;font-weight:600;color:#1f5fe0;\"></a></td></tr>\r\n"
             . "<tr><td style=\"{$font}font-size:12px;line-height:18px;color:#6b7a90;padding:10px 22px 0;word-break:break-all;\">" . $e($link) . "</td></tr>\r\n";
     }
     $out .= "<tr><td height=\"24\" style=\"font-size:0;line-height:0;\">&nbsp;</td></tr>\r\n</table></td></tr>\r\n"
