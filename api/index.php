@@ -247,7 +247,11 @@ $alert = function (string $u, string $event) use ($cfg, $ip): void {
         . "and sign out any device you do not recognise under Settings, Devices.\r\n\r\n"
         . "This message holds no passwords. The full record is under Settings, Access log.\r\n";
     $from = is_string($cfg['alert_from'] ?? null) && filter_var($cfg['alert_from'], FILTER_VALIDATE_EMAIL) ? $cfg['alert_from'] : "vault@$domain";
-    @mail($to, 'Vault alert: ' . ALERT_EVENTS[$event], $text, "From: Vault <$from>\r\nContent-Type: text/plain; charset=UTF-8\r\nX-Auto-Response-Suppress: All");
+    $headers = "From: Vault <$from>\r\nReply-To: $from\r\nContent-Type: text/plain; charset=UTF-8\r\nX-Auto-Response-Suppress: All";
+    // Name the sender on the envelope too. Without it the hosting account's own login is used, which
+    // receiving mail servers see as a mismatch and tend to file as spam. If the host refuses that, send plainly.
+    $sent = preg_match('/^[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+$/', $from) && @mail($to, 'Vault alert: ' . ALERT_EVENTS[$event], $text, $headers, '-f' . $from);
+    if (!$sent) @mail($to, 'Vault alert: ' . ALERT_EVENTS[$event], $text, $headers);
 };
 
 $audit = function (string $u, string $event, ?string $typed = null) use ($dataDir, $ip, $alert): void {
