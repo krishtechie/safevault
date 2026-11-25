@@ -44,7 +44,7 @@ Runs on ordinary shared hosting (PHP 8.1+, no database). The front end is plain 
 
 1. Create a **dedicated subdomain** for it (for example `vault.yourdomain.com`) with HTTPS on. A separate subdomain keeps the vault isolated from every other site you host.
 2. Deploy this repository into that subdomain's folder (cPanel Git, same as any other site).
-3. In cPanel File Manager, copy `api/config.sample.php` to `api/config.php` and set:
+3. In cPanel File Manager, copy `api/config.sample.php` to `vault-data/config.php` (the folder beside the website folder, outside the web root), set its permissions to 600, and set:
    - `data_dir`: a folder outside the web root, for example `/home/YOUR_CPANEL_USER/vault-data`
    - `server_secret`: a long random string (32+ characters)
    - `invite_code`: a private code (12+ characters) needed to create an account

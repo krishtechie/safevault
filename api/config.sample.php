@@ -1,6 +1,8 @@
 <?php
-// Copy this file to config.php (same folder) on the server and fill in the three values.
-// config.php is listed in .gitignore so your real values never reach GitHub.
+// Copy this file to the server as config.php and fill in the three values.
+// Best place: a folder named vault-data beside the website folder (for example /home/USER/vault-data/config.php),
+// which the web server never serves. The API looks there first. A config.php in this api folder still works.
+// Set its permissions to 600. config.php is listed in .gitignore so your real values never reach GitHub.
 return [
     // Absolute path to a folder OUTSIDE the web root. The API refuses to run if it is inside it.
     // On cPanel this is usually /home/YOUR_CPANEL_USER/vault-data

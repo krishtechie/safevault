@@ -22,9 +22,13 @@ function fail(int $code, string $error): never { out($code, ['error' => $error])
 
 /* ---------- Config ---------- */
 
-$cfgFile = __DIR__ . '/config.php';
+// Preferred place: a folder named vault-data beside the website folder, which the web server never serves.
+// The old place, next to this file, still works so an existing install keeps running until its file is moved.
+$cfgFile = dirname(__DIR__, 2) . '/vault-data/config.php';
+if (!is_file($cfgFile)) $cfgFile = __DIR__ . '/config.php';
 if (!is_file($cfgFile)) fail(500, 'not_configured');
 $cfg = require $cfgFile;
+if (!is_array($cfg)) fail(500, 'not_configured');
 
 $dataDir = rtrim((string)($cfg['data_dir'] ?? ''), '/');
 $secret  = (string)($cfg['server_secret'] ?? '');
