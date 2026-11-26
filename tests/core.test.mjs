@@ -507,3 +507,59 @@ test('version history: going back restores the old copy and moves newer entries 
   assert.equal(core.snapshotDiff(out, snapshot).back + core.snapshotDiff(out, snapshot).changed + core.snapshotDiff(out, snapshot).removed, 0);
   assert.deepEqual(core.restoreSnapshot([], [], now), []);
 });
+
+/* ---------- Secret key ---------- */
+
+test('a secret key is 25 characters in five groups and is different every time', () => {
+  const a = core.generateSecretKey();
+  const b = core.generateSecretKey();
+  assert.match(a, /^([0-9A-HJKMNP-TV-Z]{5}-){4}[0-9A-HJKMNP-TV-Z]{5}$/);
+  assert.notEqual(a, b);
+});
+
+test('a typed secret key is tolerant of case, spacing and look-alike letters', () => {
+  const key = '0O1IL-ABCDE-FGHJK-MNPQR-STVWX';
+  assert.equal(core.normalizeSecretKey(key), '00111ABCDEFGHJKMNPQRSTVWX');
+  assert.equal(core.normalizeSecretKey(' 0o1il abcde fghjk mnpqr stvwx '), '00111ABCDEFGHJKMNPQRSTVWX');
+  assert.equal(core.formatSecretKey('00111abcdefghjkmnpqrstvwx'), '00111-ABCDE-FGHJK-MNPQR-STVWX');
+  for (const bad of ['', 'ABCDE', 'ABCDE-FGHJK-MNPQR-STVWX-YZ', 'UUUUU-UUUUU-UUUUU-UUUUU-UUUUU', '0'.repeat(26)]) {
+    assert.throws(() => core.normalizeSecretKey(bad), /bad_secret_key/, bad);
+  }
+});
+
+test('with a secret key on, the keys depend on both the password and the secret key', async () => {
+  const on = { ...kdf, sk: 1 };
+  const k1 = core.generateSecretKey();
+  const k2 = core.generateSecretKey();
+  const plain = await core.deriveKeys('correct horse battery staple', salt, kdf);
+  const a = await core.deriveKeys('correct horse battery staple', salt, on, k1);
+  const again = await core.deriveKeys('correct horse battery staple', salt, on, k1.toLowerCase().replace(/-/g, ' '));
+  const otherKey = await core.deriveKeys('correct horse battery staple', salt, on, k2);
+  const otherPw = await core.deriveKeys('correct horse battery stapl3', salt, on, k1);
+  assert.equal(a.auth, again.auth);
+  assert.notEqual(a.auth, plain.auth);
+  assert.notEqual(a.auth, otherKey.auth);
+  assert.notEqual(a.auth, otherPw.auth);
+  assert.notDeepEqual(a.legacyRaw, plain.legacyRaw);
+  // the vault key wrapped with the secret key on cannot be opened with the password alone
+  const vk = core.newVaultKeyRaw();
+  const wrap = await core.wrapKey(a.kek, 'alice', vk);
+  assert.deepEqual(await core.unwrapKey(again.kek, 'alice', wrap), vk);
+  await assert.rejects(core.unwrapKey(plain.kek, 'alice', wrap));
+  await assert.rejects(core.unwrapKey(otherKey.kek, 'alice', wrap));
+});
+
+test('an account with a secret key refuses to derive keys without one, and ignores one when it is off', async () => {
+  const on = { ...kdf, sk: 1 };
+  await assert.rejects(core.deriveKeys('correct horse battery staple', salt, on), /need_secret_key/);
+  await assert.rejects(core.deriveKeys('correct horse battery staple', salt, on, 'not a key'), /bad_secret_key/);
+  const plain = await core.deriveKeys('correct horse battery staple', salt, kdf);
+  const ignored = await core.deriveKeys('correct horse battery staple', salt, kdf, core.generateSecretKey());
+  assert.equal(plain.auth, ignored.auth);
+});
+
+test('the secret key flag survives the safety check on key settings, and only as 1', () => {
+  assert.deepEqual(core.checkKdf({ ...kdf, sk: 1 }), { ...kdf, sk: 1 });
+  assert.deepEqual(core.checkKdf({ ...kdf, sk: 0 }), kdf);
+  assert.deepEqual(core.checkKdf({ ...kdf, sk: true, extra: 9 }), kdf);
+});

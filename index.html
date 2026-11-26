@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="vault-build" content="23">
+<meta name="vault-build" content="24">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://api.pwnedpasswords.com; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
@@ -49,6 +49,10 @@
     <label id="passField"><span id="aPassLabel">Master password</span>
       <input id="aPass" type="password" autocomplete="off">
     </label>
+    <label id="skField" hidden>Secret key
+      <input id="aSk" type="text" autocapitalize="characters" autocorrect="off" spellcheck="false" autocomplete="off" placeholder="25 letters and digits">
+    </label>
+    <button id="skAlt" class="link" type="button" hidden>Enter a different secret key</button>
     <label id="confirmField" hidden>Confirm master password
       <input id="aPass2" type="password" autocomplete="off">
     </label>
@@ -279,6 +283,28 @@
         </label>
         <button id="cpBtn" class="btn" type="button">Change master password</button>
         <p id="cpMsg" class="msg"></p>
+      </details>
+      <details class="card fold" name="settings">
+        <summary><h3>Secret key</h3><span class="fold-sub">A second secret that never leaves your devices</span></summary>
+        <p id="skStatus" class="muted"></p>
+        <p class="muted">A random code kept on your devices and never sent to the server. With it on, your master password alone opens nothing: a new device needs both, and a stolen copy of the server's data cannot be used to guess your password. Keep a copy on paper next to your recovery key. If you lose every device and the paper copy, the recovery key is the only way back in.</p>
+        <label>Current master password
+          <input id="skPass" type="password" autocomplete="off">
+        </label>
+        <div class="row">
+          <button id="skOn" class="btn" type="button">Turn on secret key</button>
+          <button id="skShow" class="btn" type="button" hidden>Show secret key</button>
+          <button id="skOff" class="btn danger" type="button" hidden>Turn off</button>
+        </div>
+        <p id="skMsg" class="msg"></p>
+        <div id="skOut" class="fix" hidden>
+          <p>Your secret key. Write it down now:</p>
+          <output id="skCode" class="rec-code"></output>
+          <div class="row">
+            <button id="skCopy" class="btn small" type="button">Copy</button>
+            <button id="skHide" class="btn small" type="button">I have saved it</button>
+          </div>
+        </div>
       </details>
       <details class="card fold" name="settings">
         <summary><h3>Recovery key</h3><span class="fold-sub">Your way back in if you forget the master password</span></summary>

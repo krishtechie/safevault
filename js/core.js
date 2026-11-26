@@ -37,7 +37,9 @@ export function checkKdf(kdf) {
     && Number.isInteger(kdf.t) && kdf.t >= 2 && kdf.t <= 20
     && Number.isInteger(kdf.p) && kdf.p >= 1 && kdf.p <= 4;
   if (!ok) throw new Error('Unsafe key derivation settings, refusing to continue.');
-  return { alg: kdf.alg, m: kdf.m, t: kdf.t, p: kdf.p };
+  const out = { alg: kdf.alg, m: kdf.m, t: kdf.t, p: kdf.p };
+  if (kdf.sk === 1) out.sk = 1; // the account also needs its secret key
+  return out;
 }
 
 let argon2idImpl = null;
@@ -51,11 +53,21 @@ const aesKey = (hk, info, salt) => crypto.subtle.deriveKey(
 //   kek       wraps the vault key (stays on device)
 //   legacyRaw the vault key of accounts created before key wrapping (stays on device)
 //   auth      sign-in key (sent to server, which stores only a hash of it)
-export async function deriveKeys(password, saltB64, kdfIn) {
+//
+// With a secret key on the account (kdf.sk), the Argon2id output is mixed with that key before the split.
+// The secret key is random, lives only on the person's devices and on paper, and never reaches the server.
+// So neither a stolen copy of the server's files nor a stolen master password is enough by itself:
+// guessing passwords against the server's data is pointless without the 125 random bits.
+export async function deriveKeys(password, saltB64, kdfIn, secretKey = null) {
   const kdf = checkKdf(kdfIn);
   const salt = b64.dec(saltB64);
   if (salt.length < 16) throw new Error('Bad salt.');
-  const master = await argon2idImpl({
+  let sk = null;
+  if (kdf.sk) {
+    if (!secretKey) throw new Error('need_secret_key');
+    sk = te.encode('vault-secret-key-v1|' + normalizeSecretKey(secretKey));
+  }
+  let master = await argon2idImpl({
     password: password.normalize('NFKC'),
     salt,
     parallelism: kdf.p,
@@ -64,6 +76,12 @@ export async function deriveKeys(password, saltB64, kdfIn) {
     hashLength: 32,
     outputType: 'binary',
   });
+  if (sk) {
+    const mac = await crypto.subtle.importKey('raw', sk, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    const mixed = new Uint8Array(await crypto.subtle.sign('HMAC', mac, master));
+    master.fill(0);
+    master = mixed;
+  }
   const hk = await crypto.subtle.importKey('raw', master, 'HKDF', false, ['deriveKey', 'deriveBits']);
   master.fill(0);
   const kek = await aesKey(hk, 'vault-kek-v1');
@@ -164,6 +182,22 @@ export function generateRecoveryCode() {
   for (let i = 0; i < 160; i += 5) out += B32[parseInt(bits.slice(i, i + 5), 2)];
   return out.match(/.{4}/g).join('-');
 }
+
+// The secret key: 25 characters, 125 random bits, shown in groups of five.
+export function generateSecretKey() {
+  const bytes = randomBytes(16);
+  let bits = '';
+  for (const b of bytes) bits += b.toString(2).padStart(8, '0');
+  let out = '';
+  for (let i = 0; i < 125; i += 5) out += B32[parseInt(bits.slice(i, i + 5), 2)];
+  return out.match(/.{5}/g).join('-');
+}
+export function normalizeSecretKey(input) {
+  const s = String(input).toUpperCase().replace(/[^0-9A-Z]/g, '').replace(/O/g, '0').replace(/[IL]/g, '1');
+  if (s.length !== 25 || [...s].some((c) => !B32.includes(c))) throw new Error('bad_secret_key');
+  return s;
+}
+export const formatSecretKey = (input) => normalizeSecretKey(input).match(/.{5}/g).join('-');
 
 export function normalizeRecoveryCode(input) {
   const s = String(input).toUpperCase().replace(/[^0-9A-Z]/g, '').replace(/O/g, '0').replace(/[IL]/g, '1');
@@ -558,6 +592,8 @@ export const LOG_EVENTS = Object.freeze({
   device_new: ['Signed in on a new device', 'change'],
   backup_used: ['Signed in with a two-factor backup code', 'change'],
   backup_new: ['New two-factor backup codes created', 'change'],
+  sk_on: ['Secret key turned on', 'change'],
+  sk_off: ['Secret key turned off', 'change'],
   key_add: ['Security key added', 'change'],
   key_remove: ['Security key removed', 'change'],
   key_used: ['New device approved with a security key', 'ok'],

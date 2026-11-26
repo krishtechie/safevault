@@ -104,7 +104,14 @@ function valid_kdf(mixed $k): ?array {
     foreach (['m' => [19456, 1048576], 't' => [2, 20], 'p' => [1, 4]] as $f => [$lo, $hi]) {
         if (!is_int($k[$f] ?? null) || $k[$f] < $lo || $k[$f] > $hi) return null;
     }
-    return ['alg' => 'argon2id', 'm' => $k['m'], 't' => $k['t'], 'p' => $k['p']];
+    $out = ['alg' => 'argon2id', 'm' => $k['m'], 't' => $k['t'], 'p' => $k['p']];
+    // 'sk' says the account's keys are also mixed with a secret key held only on the person's devices.
+    // The server never sees that key; it only passes the flag on so a new device knows to ask for it.
+    if (array_key_exists('sk', $k)) {
+        if ($k['sk'] !== 1) return null;
+        $out['sk'] = 1;
+    }
+    return $out;
 }
 function valid_blob(mixed $b): bool {
     if (!is_string($b) || strlen($b) > 5 * 1024 * 1024) return false;
@@ -243,12 +250,14 @@ const ALERT_EVENTS = [
     'recovery_clear' => 'Your recovery key was removed',
     'totp_off'       => 'Two-factor sign-in was turned off',
     'history_restore' => 'Your vault was restored to an earlier version',
+    'sk_on'          => 'The secret key was turned on',
+    'sk_off'         => 'The secret key was turned off',
     'key_add'        => 'A security key was added',
     'key_remove'     => 'A security key was removed',
     'key_used'       => 'A new device was approved with a security key',
     'key_fail'       => 'A security key check failed',
 ];
-const ALERT_SMART = ['device_new', 'rekey', 'recover_ok', 'totp_off', 'recovery_clear', 'login_blocked', 'recover_blocked'];
+const ALERT_SMART = ['device_new', 'rekey', 'sk_on', 'sk_off', 'recover_ok', 'totp_off', 'recovery_clear', 'login_blocked', 'recover_blocked'];
 // Which colour the notice carries: green for a normal sign-in, red for a failed or refused attempt, amber for a change.
 const ALERT_TONES = [
     'login_ok' => 'ok', 'device_new' => 'new', 'backup_used' => 'fail',
@@ -274,6 +283,8 @@ function ua_label(string $ua): string {
 const ALERT_BODY = [
     'device_new'      => 'Your vault was just opened on a device it has not seen before.',
     'rekey'           => 'The details you use to sign in to your vault were just changed. Your other devices were signed out and will ask for the new ones.',
+    'sk_on'           => 'A secret key was just turned on for your vault. A new device now needs it along with your master sign-in. Your other devices were signed out.',
+    'sk_off'          => 'The secret key for your vault was just turned off. A new device no longer needs it. Your other devices were signed out.',
     'recover_ok'      => 'Your account was just recovered with the recovery key, and new sign-in details were set.',
     'totp_off'        => 'Two-factor sign-in was just turned off. A new device no longer needs an authenticator code.',
     'recovery_clear'  => 'The recovery key for your vault was just removed. The old key no longer works.',
@@ -1095,6 +1106,7 @@ case 'POST rekey': {
     if (b64_len($body['salt'] ?? null) !== 16) fail(400, 'bad_salt');
     if (b64_len($body['newAuth'] ?? null) !== 32) fail(400, 'bad_auth');
     if (!valid_wrap($body['wrap'] ?? null)) fail(400, 'bad_wrap');
+    $hadSk = !empty($user['kdf']['sk']);
     $user = $updateUser($u, function (array $user) use ($body, $kdf, $trustHash) {
         $user['salt'] = $body['salt'];
         $user['kdf'] = $kdf;
@@ -1111,7 +1123,8 @@ case 'POST rekey': {
     $clearPins($u); // PINs on every device stop working until set again
     sign_in($u, $user['gen']);
     $touchDevice($u);
-    $audit($u, 'rekey');
+    // The same request turns the secret key on or off, since that also replaces the sign-in key.
+    $audit($u, $hadSk === !empty($kdf['sk']) ? 'rekey' : ($hadSk ? 'sk_off' : 'sk_on'));
     out(200, ['ok' => true]);
 }
 

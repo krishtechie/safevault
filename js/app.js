@@ -8,7 +8,7 @@ const API = 'api/index.php';
 // The page and this script are published together. Right after an update a browser can hold one of them from
 // before; the missing parts would then stop the app from starting. When they do not match, fetch fresh copies
 // and reload, once.
-const BUILD = '23';
+const BUILD = '24';
 {
   const page = document.querySelector('meta[name="vault-build"]');
   let tried = false;
@@ -85,6 +85,21 @@ const b64u = {
   dec: (str) => Uint8Array.from(atob(str.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0)),
 };
 const keysUsable = () => !!(window.PublicKeyCredential && navigator.credentials);
+
+// The secret key is kept on this device only, next to the encrypted vault copy. It is never sent anywhere.
+async function secretFor(username) {
+  const r = await store.get('sk').catch(() => null);
+  return r && r.username === username ? r.key : null;
+}
+const keepSecret = (username, key) => store.set('sk', { username, key: core.formatSecretKey(key) });
+const typedSecret = () => ($('skField').hidden ? '' : $('aSk').value.trim());
+let skAccount = false;   // the server said this account uses a secret key
+let recoverNote = '';
+function showSecretField(on) {
+  $('skField').hidden = !on;
+  $('skAlt').hidden = true;
+  if (!on) $('aSk').value = '';
+}
 let keyOffer = null;  // { challenge, ids } from the server
 let keyAnswer = null; // the key's answer, used once
 function setKeyOffer(offer) {
@@ -113,7 +128,7 @@ async function wipeDevice(message) {
   trust = null;
   recents.clear();
   breach.clear();
-  for (const k of ['quick', 'trust', 'state', 'unlock']) await store.del(k).catch(() => {});
+  for (const k of ['quick', 'trust', 'state', 'unlock', 'sk']) await store.del(k).catch(() => {});
   await newDid();
   if (S.encKey) lock(message);
   else { setAuthMode('unlock'); $('authMsg').textContent = message; }
@@ -149,6 +164,11 @@ async function copy(text, label = 'Copied') {
 
 const ERRORS = {
   bad_credentials: 'Wrong username or master password.',
+  bad_credentials_sk: 'Wrong master password or secret key.',
+  need_secret_key: 'This account uses a secret key. Enter it above. You can see it on a device that is already signed in, under Settings, Secret key.',
+  bad_secret_key: 'That does not look like a secret key. It is 25 letters and digits, shown in five groups of five.',
+  sk_needs_recovery: 'Create a recovery key first. It is the only way back in if you lose every device and the paper copy.',
+  sk_missing: 'The secret key is not stored on this device.',
   device_revoked: 'This device was signed out from another device, and its copy of the vault was erased. Sign in again with your master password to use it here.',
   bad_tags: 'A tag can be up to 24 characters.',
   too_many_tags: 'Up to 6 tags per entry.',
@@ -255,6 +275,8 @@ function setAuthMode(m) {
   setBackupMode(false);
   setKeyOffer(null);
   keyAnswer = null;
+  showSecretField(false);
+  skAccount = false;
   $('aTotp').value = '';
   const focus = { pin: 'aPin', unlock: $('aUser').value ? 'aPass' : 'aUser' }[m];
   if (focus && !$('auth').hidden) $(focus).focus();
@@ -329,7 +351,8 @@ async function unlock(username, password) {
   let stale = false; // the device copy opened with this password but the server refused it
   if (cached && cached.username === username) {
     // Known device: open the local encrypted copy first (works offline), then check in with the server.
-    const keys = await core.deriveKeys(password, cached.salt, cached.kdf);
+    const mine = cached.kdf && cached.kdf.sk ? (typedSecret() || await secretFor(username)) : null;
+    const keys = await core.deriveKeys(password, cached.salt, cached.kdf, mine);
     let local = null;
     try {
       const raw = cached.wrap ? await core.unwrapKey(keys.kek, username, cached.wrap) : keys.legacyRaw;
@@ -361,6 +384,7 @@ async function unlock(username, password) {
           items: local.items, rev: cached.rev, dirty: !!cached.dirty,
         });
         await patchCache();
+        if (mine) await keepSecret(username, mine);
         return;
       }
       stale = true;
@@ -370,10 +394,14 @@ async function unlock(username, password) {
   let pre;
   try { pre = await api('prelogin', { username }); }
   catch (e) { throw cached && e.offline ? new Error('bad_credentials') : e; }
-  const keys = await core.deriveKeys(password, pre.salt, pre.kdf);
+  // An account with a secret key needs it here. This device may already hold it; a new device asks for it once.
+  skAccount = !!(pre.kdf && pre.kdf.sk);
+  const sk = skAccount ? (typedSecret() || await secretFor(username)) : null;
+  const keys = await core.deriveKeys(password, pre.salt, pre.kdf, sk);
   let r;
   try { r = await signIn(username, keys); }
-  catch (e) { throw stale && e.message === 'bad_credentials' ? new Error('changed_elsewhere') : e; }
+  catch (e) { throw stale && !skAccount && e.message === 'bad_credentials' ? new Error('changed_elsewhere') : e; }
+  if (sk) await keepSecret(username, sk);
   const vk = await core.importVaultKey(r.vkRaw);
   const v = await api('vault');
   const remote = await core.decryptVault(vk, username, v.blob);
@@ -410,8 +438,13 @@ async function recover(username, code, password) {
   catch (e) { throw e.message === 'bad_credentials' ? new Error('bad_recovery') : e; }
   const vkRaw = await core.unwrapKey(rec.kek, username, start.recWrap, 'rec');
   const salt = newSalt();
-  const kdf = { ...core.KDF_DEFAULT };
-  const keys = await core.deriveKeys(password, salt, kdf);
+  // The secret key stays on if this device holds it. A device that never had it cannot keep it on, so the
+  // recovery turns it off there and says so; the recovery key is the way back in when everything else is lost.
+  let hadSk = false;
+  try { hadSk = !!(await api('prelogin', { username })).kdf.sk; } catch { /* decided by what this device holds */ }
+  const mine = await secretFor(username);
+  const kdf = { ...core.KDF_DEFAULT, ...(hadSk && mine ? { sk: 1 } : {}) };
+  const keys = await core.deriveKeys(password, salt, kdf, mine);
   const wrap = await core.wrapKey(keys.kek, username, vkRaw);
   const dropTotp = $('aRecDrop').checked;
   const done = await api('recover_finish', {
@@ -419,6 +452,8 @@ async function recover(username, code, password) {
     trust: trust && trust.username === username ? trust.token : undefined,
   });
   if (quick) delete quick.pin; // the server turned PINs off for this account
+  recoverNote = hadSk && !kdf.sk ? ' The secret key was turned off, because this device did not have it. Turn it on again in Settings' : '';
+  if (!kdf.sk) await store.del('sk').catch(() => {});
   const vk = await core.importVaultKey(vkRaw);
   const v = await api('vault');
   const remote = await core.decryptVault(vk, username, v.blob);
@@ -562,8 +597,10 @@ $('authForm').addEventListener('submit', async (ev) => {
     setBackupMode(false);
     setKeyOffer(null);
     enterApp();
-    if (started === 'recover') toast(S.totp ? 'New master password set. Two-factor sign-in is still on' : 'New master password set');
+    if (started === 'recover') toast((S.totp ? 'New master password set. Two-factor sign-in is still on' : 'New master password set') + (recoverNote ? '.' + recoverNote : ''));
     else if (notice) toast(notice);
+    recoverNote = '';
+    showSecretField(false);
     notice = '';
   } catch (e) {
     $('aPin').value = '';
@@ -575,8 +612,15 @@ $('authForm').addEventListener('submit', async (ev) => {
       else if (e.message !== 'bad_totp') setKeyOffer(null);
       $('aTotp').focus();
     }
+    if (e.message === 'need_secret_key' || e.message === 'bad_secret_key') { // new device on an account with a secret key
+      showSecretField(true);
+      $('aSk').focus();
+    } else if (e.message === 'bad_credentials' && skAccount && $('skField').hidden) {
+      $('skAlt').hidden = false; // the key kept on this device may have been replaced on another one
+    }
     msg.textContent = e.message === 'bad_totp' && backupMode ? ERRORS.bad_backup
-      : e.message === 'totp_required' && keyOffer ? ERRORS.totp_or_key : explain(e);
+      : e.message === 'totp_required' && keyOffer ? ERRORS.totp_or_key
+      : e.message === 'bad_credentials' && !$('skField').hidden ? ERRORS.bad_credentials_sk : explain(e);
   } finally {
     btn.disabled = false;
     setAuthModeLabel();
@@ -638,6 +682,10 @@ function lock(message = '') {
   $('backupShow').hidden = true;
   $('backupMsg').textContent = '';
   $('backupStatus').textContent = '';
+  $('skCode').textContent = '';
+  $('skOut').hidden = true;
+  $('skMsg').textContent = '';
+  $('skPass').value = '';
   S.keys = [];
   $('keyList').replaceChildren();
   $('keyMsg').textContent = '';
@@ -1437,6 +1485,13 @@ $('stayUnlocked').addEventListener('change', () => {
 });
 
 function renderAccount() {
+  const skOn = !!(S.kdf && S.kdf.sk);
+  $('skStatus').textContent = skOn
+    ? 'The secret key is on. A new device needs your master password and this key.'
+    : 'Off. Your master password alone is enough to sign in on a new device.';
+  $('skOn').hidden = skOn;
+  $('skShow').hidden = !skOn;
+  $('skOff').hidden = !skOn;
   $('recStatus').textContent = S.hasRecovery
     ? 'A recovery key is set for this account. Creating a new one replaces it.'
     : 'No recovery key yet. Without one, a forgotten master password cannot be reset by anyone.';
@@ -1470,7 +1525,7 @@ async function authed(fn) {
 // Re-enter the current master password before any sensitive change. Returns its keys and the raw vault key.
 async function confirmMaster(password) {
   if (!password) throw new Error('need_current');
-  const keys = await core.deriveKeys(password, S.salt, S.kdf);
+  const keys = await core.deriveKeys(password, S.salt, S.kdf, await secretFor(S.username));
   if (keys.auth !== S.auth) throw new Error('bad_current');
   if (!S.wrap) { // account not upgraded yet (this device was offline since the update)
     const r = await signIn(S.username, keys);
@@ -1500,13 +1555,12 @@ async function withButton(btn, msg, fn) {
   }
 }
 
-$('cpBtn').addEventListener('click', () => withButton($('cpBtn'), $('cpMsg'), async () => {
-  const next = $('cpNew').value;
-  checkStrength(next, $('cpNew2').value);
-  const { keys: cur, vkRaw } = await confirmMaster($('cpCur').value);
+// Replaces the sign-in key and the wrapping of the vault key: used for a new master password and for turning
+// the secret key on or off. The vault data is not rewritten. Returns whether a PIN was lost in the change.
+async function newSignIn(password, cur, vkRaw, secretKey) {
   const salt = newSalt();
-  const kdf = { ...core.KDF_DEFAULT };
-  const keys = await core.deriveKeys(next, salt, kdf);
+  const kdf = { ...core.KDF_DEFAULT, ...(secretKey ? { sk: 1 } : {}) };
+  const keys = await core.deriveKeys(password, salt, kdf, secretKey);
   const wrap = await core.wrapKey(keys.kek, S.username, vkRaw);
   await authed(() => api('rekey', { auth: cur.auth, newAuth: keys.auth, salt, kdf, wrap, trust: trust && trust.username === S.username ? trust.token : undefined }));
   Object.assign(S, { auth: keys.auth, salt, kdf, wrap });
@@ -1515,6 +1569,14 @@ $('cpBtn').addEventListener('click', () => withButton($('cpBtn'), $('cpMsg'), as
   await rememberUnlock();
   const hadPin = !!(quick && quick.pin);
   if (quick) { delete quick.pin; quick.auth = sealedAuth; await saveQuick(); } // the server turned PINs off for this account
+  return hadPin;
+}
+
+$('cpBtn').addEventListener('click', () => withButton($('cpBtn'), $('cpMsg'), async () => {
+  const next = $('cpNew').value;
+  checkStrength(next, $('cpNew2').value);
+  const { keys: cur, vkRaw } = await confirmMaster($('cpCur').value);
+  const hadPin = await newSignIn(next, cur, vkRaw, S.kdf.sk ? await secretFor(S.username) : null);
   for (const id of ['cpCur', 'cpNew', 'cpNew2']) $(id).value = '';
   return 'Master password changed. Your other devices are signed out and will ask for the new one.' + (hadPin ? ' PIN unlock was turned off, so set your PIN again.' : '');
 }));
@@ -1533,6 +1595,45 @@ $('recBtn').addEventListener('click', () => withButton($('recBtn'), $('recMsg'),
   $('recOut').hidden = false;
   return 'Recovery key created. It is shown only this once.';
 }));
+/* ---------- Secret key ---------- */
+
+function showSecret(key) {
+  $('skCode').textContent = core.formatSecretKey(key);
+  $('skOut').hidden = false;
+}
+const pinNote = (hadPin) => (hadPin ? ' PIN unlock was turned off, so set your PIN again.' : '');
+$('skOn').addEventListener('click', () => withButton($('skOn'), $('skMsg'), async () => {
+  const { keys: cur, vkRaw } = await confirmMaster($('skPass').value);
+  if (!S.hasRecovery) throw new Error('sk_needs_recovery');
+  const key = core.generateSecretKey();
+  // Stored here before the server hears of the change, so no failure in between can leave this device without it.
+  // Until the account uses a secret key, a stored one is simply ignored.
+  await keepSecret(S.username, key);
+  const hadPin = await newSignIn($('skPass').value, cur, vkRaw, key);
+  $('skPass').value = '';
+  showSecret(key);
+  return 'The secret key is on. Your other devices are signed out and will ask for it once.' + pinNote(hadPin);
+}));
+$('skShow').addEventListener('click', () => withButton($('skShow'), $('skMsg'), async () => {
+  await confirmMaster($('skPass').value);
+  const key = await secretFor(S.username);
+  if (!key) throw new Error('sk_missing');
+  $('skPass').value = '';
+  showSecret(key);
+  return '';
+}));
+$('skOff').addEventListener('click', () => withButton($('skOff'), $('skMsg'), async () => {
+  const { keys: cur, vkRaw } = await confirmMaster($('skPass').value);
+  const hadPin = await newSignIn($('skPass').value, cur, vkRaw, null);
+  await store.del('sk').catch(() => {});
+  $('skPass').value = '';
+  $('skCode').textContent = '';
+  $('skOut').hidden = true;
+  return 'The secret key is off. Your other devices are signed out and will ask for your master password.' + pinNote(hadPin);
+}));
+$('skCopy').addEventListener('click', () => copy($('skCode').textContent, 'Secret key copied'));
+$('skHide').addEventListener('click', () => { $('skCode').textContent = ''; $('skOut').hidden = true; $('skMsg').textContent = ''; });
+
 $('recCopy').addEventListener('click', () => copy($('recCode').textContent, 'Recovery key copied'));
 $('recHide').addEventListener('click', () => { $('recCode').textContent = ''; $('recOut').hidden = true; $('recMsg').textContent = ''; });
 
@@ -1800,7 +1901,7 @@ $('importBtn').addEventListener('click', async () => {
     const b = JSON.parse(await file.text());
     if (b.format !== 'vault-backup-v1' && b.format !== 'vault-backup-v2') throw new Error('format');
     // A backup opens with the master password that was in use when it was made.
-    const keys = await core.deriveKeys($('importPass').value, b.salt, b.kdf);
+    const keys = await core.deriveKeys($('importPass').value, b.salt, b.kdf, await secretFor(S.username));
     const raw = b.wrap ? await core.unwrapKey(keys.kek, b.username, b.wrap) : keys.legacyRaw;
     const items = await core.decryptVault(await core.importVaultKey(raw), b.username, b.blob);
     S.items = core.mergeItems(S.items, items);
@@ -1817,9 +1918,13 @@ $('importBtn').addEventListener('click', async () => {
 
 let signOutArmed = false;
 $('signOutBtn').addEventListener('click', async () => {
-  if (S.dirty && !signOutArmed) {
+  const warn = [
+    S.dirty ? 'Unsynced changes will be lost.' : '',
+    S.kdf && S.kdf.sk ? 'The secret key is removed from this device, so have your copy ready.' : '',
+  ].filter(Boolean).join(' ');
+  if (warn && !signOutArmed) {
     signOutArmed = true;
-    $('signOutBtn').textContent = 'Unsynced changes will be lost. Tap again';
+    $('signOutBtn').textContent = warn + ' Tap again';
     return;
   }
   signOutArmed = false;
@@ -1832,6 +1937,7 @@ $('signOutBtn').addEventListener('click', async () => {
   breach.clear();
   await store.del('quick').catch(() => {});
   await store.del('trust').catch(() => {});
+  await store.del('sk').catch(() => {});
   await store.del('state');
   await newDid(); // the server has forgotten this device; it starts afresh next time
   lock();
@@ -1839,6 +1945,7 @@ $('signOutBtn').addEventListener('click', async () => {
 });
 
 $('totpAlt').addEventListener('click', () => { setBackupMode(!backupMode); $('authMsg').textContent = ''; $('aTotp').focus(); });
+$('skAlt').addEventListener('click', () => { showSecretField(true); $('authMsg').textContent = ''; $('aSk').focus(); });
 // Second step with a security key: the key signs the server's challenge, then the form is sent again with it.
 $('keyBtn').addEventListener('click', async () => {
   if (!keyOffer || $('authBtn').disabled) return;
