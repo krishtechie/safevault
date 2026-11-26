@@ -1,0 +1,38 @@
+name: Live site matches repository
+
+# Fetches the live site from outside and compares every file the app loads with this repository.
+# A failed run means the site is serving something that was not committed here. GitHub emails the
+# repository owner when a run fails.
+
+on:
+  schedule:
+    - cron: '17 * * * *'   # every hour
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integrity
+  cancel-in-progress: true
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Unit tests
+        run: node --test tests/*.test.mjs
+      - name: Compare the live site with this commit
+        # SITE_URL is a repository secret (Settings, Secrets and variables, Actions), so the address stays
+        # out of this public repository and its logs. After a push the host needs a few minutes to update,
+        # so differences are retried for a while before the run fails.
+        env:
+          SITE_URL: ${{ secrets.SITE_URL }}
+        run: node tests/check-live.mjs --wait=${{ github.event_name == 'schedule' && '5' || '15' }}
