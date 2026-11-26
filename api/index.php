@@ -822,7 +822,11 @@ case 'POST login': {
     if (!empty($user['totp']) && !$isTrusted($user, $body['trust'] ?? null)) {
         // Right master password on a device that has not passed the second step: ask for the code,
         // and offer the security key check if the account has keys.
-        $keyOffer = empty($user['keys']) ? [] : ['key' => ['ids' => array_column($user['keys'], 'id')]];
+        // Each key comes with how it connects (built in, USB, NFC), so the device knows where to look for it.
+        $keyOffer = empty($user['keys']) ? [] : ['key' => [
+            'ids' => array_column($user['keys'], 'id'),
+            'list' => array_map(fn($k) => ['id' => $k['id'], 'tr' => array_values($k['tr'] ?? [])], array_values($user['keys'])),
+        ]];
         $keyIn = is_array($body['key'] ?? null) ? $body['key'] : null;
         if ($keyIn === null && (!isset($body['totp']) || $body['totp'] === '')) {
             if ($keyOffer) $keyOffer['key']['challenge'] = $keyChallenge($u, 'get');
@@ -990,6 +994,11 @@ case 'POST key_add': {
     $der = b64u_dec($body['pk'] ?? null, 2048);
     $alg = $body['alg'] ?? null;
     if ($id === null || $cd === null || $ad === null || $der === null || !in_array($alg, [-7, -257], true)) fail(400, 'bad_key');
+    // How the key connects, as the browser reports it. Only a hint for later sign-ins, so unknown words are dropped.
+    $tr = array_values(array_unique(array_intersect(
+        ['internal', 'hybrid', 'usb', 'nfc', 'ble', 'smart-card'],
+        array_filter(is_array($body['transports'] ?? null) ? $body['transports'] : [], 'is_string')
+    )));
     $c = key_client($cd, 'webauthn.create') ?? fail(400, 'bad_key');
     $rp = key_site($c['origin']) ?? fail(400, 'bad_key');
     // The key's own record: made for this site, with a person present, and carrying the same id the browser reported.
@@ -1014,13 +1023,13 @@ case 'POST key_add': {
     if (!$keyChallengeOk($u, 'create', $c['challenge'])) fail(400, 'key_expired');
     $kid = b64u_enc($id);
     $state = 'ok';
-    $user = $updateUser($u, function (array $fresh) use ($kid, $der, $alg, $ad, $name, $rp, $c, &$state) {
+    $user = $updateUser($u, function (array $fresh) use ($kid, $der, $alg, $ad, $name, $rp, $c, $tr, &$state) {
         if (empty($fresh['totp'])) { $state = 'key_needs_totp'; return $fresh; }
         if (count($fresh['keys'] ?? []) >= KEY_MAX) { $state = 'key_limit'; return $fresh; }
         foreach ($fresh['keys'] ?? [] as $k) if ($k['id'] === $kid) { $state = 'key_exists'; return $fresh; }
         $fresh['keys'][] = [
             'id' => $kid, 'pk' => base64_encode($der), 'alg' => $alg, 'count' => unpack('N', substr($ad, 33, 4))[1],
-            'name' => $name, 'at' => time(), 'last' => 0, 'rp' => $rp, 'origin' => $c['origin'],
+            'name' => $name, 'at' => time(), 'last' => 0, 'rp' => $rp, 'origin' => $c['origin'], 'tr' => $tr,
         ];
         return $fresh;
     });

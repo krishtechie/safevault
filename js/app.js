@@ -8,7 +8,7 @@ const API = 'api/index.php';
 // The page and this script are published together. Right after an update a browser can hold one of them from
 // before; the missing parts would then stop the app from starting. When they do not match, fetch fresh copies
 // and reload, once.
-const BUILD = '22';
+const BUILD = '23';
 {
   const page = document.querySelector('meta[name="vault-build"]');
   let tried = false;
@@ -1849,7 +1849,11 @@ $('keyBtn').addEventListener('click', async () => {
     a = await navigator.credentials.get({ publicKey: {
       challenge: b64u.dec(keyOffer.challenge),
       rpId: location.hostname,
-      allowCredentials: keyOffer.ids.map((id) => ({ type: 'public-key', id: b64u.dec(id) })),
+      allowCredentials: (keyOffer.list || keyOffer.ids.map((id) => ({ id }))).map((k) => {
+        const c = { type: 'public-key', id: b64u.dec(k.id) };
+        if (k.tr && k.tr.length) c.transports = k.tr;
+        return c;
+      }),
       userVerification: 'discouraged', timeout: 60000,
     } });
   } catch { msg.textContent = ERRORS.key_cancelled; return; }
@@ -1970,6 +1974,7 @@ $('keyAdd').addEventListener('click', () => withButton($('keyAdd'), $('keyMsg'),
   const r = await authed(() => api('key_add', {
     name, id: b64u.enc(cred.rawId), clientData: b64u.enc(res.clientDataJSON),
     authData: b64u.enc(res.getAuthenticatorData()), pk: b64u.enc(pk), alg: res.getPublicKeyAlgorithm(),
+    transports: res.getTransports ? res.getTransports() : [],
   }));
   S.keys = r.keys;
   $('keyName').value = '';
