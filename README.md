@@ -30,6 +30,7 @@ Runs on ordinary shared hosting (PHP 8.1+, no database). The front end is plain 
 | Email alerts | Optional. With `alert_email` set in `config.php`, the server emails only when the vault is opened on a new device, the master password changes, the account is recovered, two-factor is turned off, the recovery key is removed, or sign-in is blocked after repeated wrong tries. Everything else stays in the Access log; `alert_level` set to `all` emails every event. Capped at 40 an hour. The messages hold no secrets, and the address never reaches the repository |
 | Backup codes | With two-factor on, ten single-use codes can be created for signing in without the authenticator. Only a keyed hash of each is stored. Creating new ones cancels the old ones, and each use is logged |
 | Security keys | With two-factor on, up to five security keys or passkeys (WebAuthn, FIDO2) can be added. On a new device the key signs a one-time server challenge in place of a typed code. The answer is bound to this site's address, so a look-alike page gets nothing it can reuse. The server stores only public keys, checks the signature, the site, that a person was present and the key's use counter, and each challenge works once |
+| Code integrity | Every hour, and after every push, a GitHub Actions job fetches the live site from outside and compares each file the app loads, byte for byte, with this repository. It also checks that the content policy header is intact and that `.git`, `.htaccess` and the tests are not readable. A mismatch fails the run and GitHub emails the owner. The check lives outside the app on purpose: tampered code could fake a check built into itself |
 | Authenticator codes | An entry can hold a site's two-factor key. The key is stored inside the encrypted vault and the 6-digit code is computed on the device (TOTP, RFC 6238) |
 | Stay unlocked | Optional. The vault key is held as a non-extractable browser key until the auto-lock time passes, so a page reload does not ask for the password again. Closing and reopening the app always asks to unlock, with Face ID offered at once when it is on |
 | Server knowledge | Only a bcrypt hash of the sign-in key and the encrypted vault blob. A full server breach exposes no passwords |
@@ -59,10 +60,18 @@ Runs on ordinary shared hosting (PHP 8.1+, no database). The front end is plain 
 ## Tests
 
 ```
-node --test tests/core.test.mjs
+node --test tests/*.test.mjs
 ```
 
-Covers key derivation (cross-checked against libsodium), encryption round trips and tamper detection, key wrapping, recovery keys, compatibility with vaults from the first release, merge rules, generator output, and the leak-check protocol.
+Covers key derivation (cross-checked against libsodium), encryption round trips and tamper detection, key wrapping, recovery keys, compatibility with vaults from the first release, merge rules, generator output, and the leak-check protocol. A second file tests the live-site check itself: a changed byte, a missing file, an exposed hidden path and a weakened content policy must each be reported.
+
+## Checking the live site
+
+`.github/workflows/integrity.yml` runs the comparison on GitHub. It needs one repository secret, `SITE_URL`, holding the full address of your site (Settings, Secrets and variables, Actions). The address is kept as a secret so it stays out of the public repository and its logs. To run the same check from a computer:
+
+```
+node tests/check-live.mjs https://your-site.example
+```
 
 ## Limits to know about
 
@@ -71,6 +80,7 @@ Covers key derivation (cross-checked against libsodium), encryption round trips 
 - Not in this version: browser autofill.
 - Rollback detection needs a device that has seen the newer copy. A brand new device has nothing to compare against.
 - PIN unlock protects against someone who has the device but not the PIN. Someone holding both the device's storage and the server's files could try all PINs, so the master password remains the real key.
+- The live-site check compares what the host serves to GitHub. It cannot see server-side PHP, files added next to the app, or a host that serves a clean copy to GitHub and a changed one to you. It runs hourly, so a change can go unnoticed for up to an hour.
 - Passwords are in memory while the vault is unlocked, so a compromised device or malicious browser extension can still read them. That is true of every password manager.
 
 ## Third-party code
