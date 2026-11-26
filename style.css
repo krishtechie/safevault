@@ -320,3 +320,14 @@ a.btn { display: inline-flex; align-items: center; text-decoration: none; }
 
 /* Recovery form: the "lost my authenticator" switch sits between two fields and needs room below it. */
 #recDropField { font-size: 15px; margin: 2px 0 18px; }
+
+/* Settings: groups, a state label on each section, and a short "what you need, and when" card. */
+.group { font-size: 13px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 26px 18px 8px; }
+.state { display: inline-block; vertical-align: 1px; margin-left: 8px; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; letter-spacing: 0; background: var(--field); color: var(--muted); }
+.state:empty { display: none; }
+.state.on { background: var(--accent-soft); color: var(--accent); }
+.state.warn { background: var(--warn-soft); color: var(--warn); }
+.need dl { margin: 12px 0 0; }
+.need dt { font-size: 13px; color: var(--muted); margin-top: 12px; }
+.need dt:first-child { margin-top: 0; }
+.need dd { margin: 2px 0 0; font-size: 17px; line-height: 1.3; }

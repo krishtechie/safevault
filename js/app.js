@@ -8,7 +8,7 @@ const API = 'api/index.php';
 // The page and this script are published together. Right after an update a browser can hold one of them from
 // before; the missing parts would then stop the app from starting. When they do not match, fetch fresh copies
 // and reload, once.
-const BUILD = '24';
+const BUILD = '25';
 {
   const page = document.querySelector('meta[name="vault-build"]');
   let tried = false;
@@ -1476,7 +1476,7 @@ $('healthBtn').addEventListener('click', async () => {
 /* ---------- Settings ---------- */
 
 $('lockMin').value = String(parseInt(localStorage.getItem('lockMin'), 10) || 5);
-$('lockMin').addEventListener('change', () => localStorage.setItem('lockMin', $('lockMin').value));
+$('lockMin').addEventListener('change', () => { localStorage.setItem('lockMin', $('lockMin').value); renderAccount(); });
 
 $('stayUnlocked').checked = stayOn();
 $('stayUnlocked').addEventListener('change', () => {
@@ -1504,6 +1504,18 @@ function renderAccount() {
   renderBackup();
   renderKeys();
   const q = quickFor(S.username);
+  // A state label on each section, and one plain summary of what is needed when, so nothing has to be opened to see it.
+  const state = (id, text, cls = '') => { $(id).textContent = text; $(id).className = 'state' + (cls ? ' ' + cls : ''); };
+  const nKeys = (S.keys || []).length;
+  const fast = [q && q.pin ? 'PIN' : '', q && q.bio ? bioName : ''].filter(Boolean);
+  state('stSk', skOn ? 'On' : 'Off', skOn ? 'on' : '');
+  state('stTfa', S.totp ? 'On' : 'Off', S.totp ? 'on' : '');
+  state('stRec', S.hasRecovery ? 'Saved' : 'Not set', S.hasRecovery ? 'on' : 'warn');
+  state('stQuick', fast.length ? fast.join(' + ') : 'Off', fast.length ? 'on' : '');
+  state('stLock', $('lockMin').selectedOptions[0] ? $('lockMin').selectedOptions[0].textContent.trim() : '');
+  $('needDaily').textContent = fast.length ? `Master password, or ${fast.join(' or ')}` : 'Master password';
+  $('needNew').textContent = ['Master password', skOn ? 'secret key' : '', S.totp ? (nKeys ? 'a code or your security key' : 'a code from your authenticator') : ''].filter(Boolean).join(' + ');
+  $('needLost').textContent = S.hasRecovery ? 'Recovery key, from where you saved it' : 'Nothing can help yet. Create a recovery key below';
   $('pinBtn').textContent = q && q.pin ? 'Change PIN' : 'Set PIN';
   $('pinOff').hidden = !(q && q.pin);
   $('bioOn').textContent = 'Turn on ' + bioName;
@@ -1989,8 +2001,7 @@ async function loadAccountInfo() {
     if (!S.encKey) return;
     S.backup = r.backup;
     S.keys = Array.isArray(r.keys) ? r.keys : [];
-    renderBackup();
-    renderKeys();
+    renderAccount();
   } catch { /* offline: the count simply stays as it was */ }
 }
 $('backupNew').addEventListener('click', () => withButton($('backupNew'), $('backupMsg'), async () => {
