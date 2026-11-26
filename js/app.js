@@ -8,7 +8,7 @@ const API = 'api/index.php';
 // The page and this script are published together. Right after an update a browser can hold one of them from
 // before; the missing parts would then stop the app from starting. When they do not match, fetch fresh copies
 // and reload, once.
-const BUILD = '21';
+const BUILD = '22';
 {
   const page = document.querySelector('meta[name="vault-build"]');
   let tried = false;
@@ -78,6 +78,19 @@ function setBackupMode(on) {
   $('totpAlt').textContent = on ? 'Use the authenticator code instead' : 'Use a backup code instead';
 }
 const typedCode = () => (backupMode ? $('aTotp').value.trim().toLowerCase() : $('aTotp').value.replace(/\D/g, ''));
+// A security key can pass the second step instead of a code. The server offers a one-time challenge for it
+// along with "code needed"; the key's signed answer rides on the next sign-in request.
+const b64u = {
+  enc: (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''),
+  dec: (str) => Uint8Array.from(atob(str.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0)),
+};
+const keysUsable = () => !!(window.PublicKeyCredential && navigator.credentials);
+let keyOffer = null;  // { challenge, ids } from the server
+let keyAnswer = null; // the key's answer, used once
+function setKeyOffer(offer) {
+  keyOffer = offer && keysUsable() ? offer : null;
+  $('keyBtn').hidden = !keyOffer;
+}
 
 async function api(action, body, query = '') {
   await didReady;
@@ -175,6 +188,17 @@ const ERRORS = {
   bad_totp: 'That code is not right, or it was already used. Wait for the next code and try again.',
   bad_backup: 'That backup code is not right, or it was already used.',
   totp_off: 'Two-factor sign-in is off, so there are no backup codes to make.',
+  totp_or_key: 'Enter the 6-digit code from your authenticator app, or use your security key.',
+  bad_key: 'The security key was not accepted. Try it again, or enter a code instead.',
+  key_cancelled: 'The security key check was cancelled or timed out. Try again, or enter a code instead.',
+  key_needs_totp: 'Turn on two-factor sign-in first. Security keys are added on top of it.',
+  key_limit: 'An account can hold up to 5 security keys. Remove one first.',
+  key_exists: 'That security key is already on this account.',
+  key_expired: 'That took too long. Tap Add a security key and try again.',
+  bad_key_name: 'Give the key a name of up to 40 characters.',
+  key_unsupported: 'This browser cannot use security keys.',
+  key_failed: 'No key was added. It was cancelled, it timed out, or this key is already on the account.',
+  no_key: 'That security key is no longer on the account.',
   bad_secret: 'Could not set up the authenticator. Start the setup again.',
   totp_lost: 'This device needs your authenticator code again. Unlock with your master password.',
   bad_totp_secret: 'That authenticator key is not valid. Paste the key the site shows during two-factor setup, or its otpauth:// link.',
@@ -229,6 +253,8 @@ function setAuthMode(m) {
   $('aPin').value = '';
   $('totpField').hidden = true;
   setBackupMode(false);
+  setKeyOffer(null);
+  keyAnswer = null;
   $('aTotp').value = '';
   const focus = { pin: 'aPin', unlock: $('aUser').value ? 'aPass' : 'aUser' }[m];
   if (focus && !$('auth').hidden) $(focus).focus();
@@ -257,10 +283,11 @@ const checkStrength = (pw, pw2) => {
 // wrapping existed are upgraded here: their existing key is wrapped and stored, and the vault is left as is.
 // A device that has passed the authenticator check holds a random token, so it is not asked again.
 let trust = null; // { username, token }
-const loginBody = (username, auth, code = '') => {
+const loginBody = (username, auth, code = '', key = null) => {
   const body = { username, auth };
   if (trust && trust.username === username) body.trust = trust.token;
-  if (code) body.totp = code;
+  if (key) body.key = key;
+  else if (code) body.totp = code;
   return body;
 };
 async function keepTrust(username, token) {
@@ -279,7 +306,9 @@ const relogin = () => {
 };
 
 async function signIn(username, keys) {
-  const r = await api('login', loginBody(username, keys.auth, $('totpField').hidden ? '' : typedCode()));
+  const answer = keyAnswer;
+  keyAnswer = null;
+  const r = await api('login', loginBody(username, keys.auth, $('totpField').hidden ? '' : typedCode(), answer));
   if (typeof r.backupLeft === 'number') notice = `Backup code used. ${r.backupLeft} left` + (r.backupLeft < 3 ? '. Create new ones in Settings' : '');
   await keepTrust(username, r.trust);
   const vkRaw = r.wrap ? await core.unwrapKey(keys.kek, username, r.wrap) : keys.legacyRaw;
@@ -321,7 +350,7 @@ async function unlock(username, password) {
         // recovery on another device gives the account a new salt even when the same password is kept.
         if (e.message === 'bad_credentials') local = null;
         if (e.message === 'device_revoked') throw e; // signed out remotely: the local copy is already erased
-        if (e.message === 'totp_required' || e.message === 'bad_totp') throw e; // the server wants the authenticator code
+        if (['totp_required', 'bad_totp', 'bad_key'].includes(e.message)) throw e; // the server wants the second step
         // offline or busy: carry on with the device copy
       }
       if (local) {
@@ -531,6 +560,7 @@ $('authForm').addEventListener('submit', async (ev) => {
     for (const id of ['aPass', 'aPass2', 'aInvite', 'aRec', 'aPin', 'aTotp']) $(id).value = '';
     $('totpField').hidden = true;
     setBackupMode(false);
+    setKeyOffer(null);
     enterApp();
     if (started === 'recover') toast(S.totp ? 'New master password set. Two-factor sign-in is still on' : 'New master password set');
     else if (notice) toast(notice);
@@ -538,12 +568,15 @@ $('authForm').addEventListener('submit', async (ev) => {
   } catch (e) {
     $('aPin').value = '';
     if (started === 'pin' && ['pin_locked', 'pin_gone', 'need_master'].includes(e.message)) setAuthMode('unlock');
-    if (e.message === 'totp_required' || e.message === 'bad_totp') { // right master password, new device: second step
+    if (['totp_required', 'bad_totp', 'bad_key'].includes(e.message)) { // right master password, new device: second step
       $('totpField').hidden = false;
       $('aTotp').value = '';
+      if (e.data && e.data.key) setKeyOffer(e.data.key);
+      else if (e.message !== 'bad_totp') setKeyOffer(null);
       $('aTotp').focus();
     }
-    msg.textContent = e.message === 'bad_totp' && backupMode ? ERRORS.bad_backup : explain(e);
+    msg.textContent = e.message === 'bad_totp' && backupMode ? ERRORS.bad_backup
+      : e.message === 'totp_required' && keyOffer ? ERRORS.totp_or_key : explain(e);
   } finally {
     btn.disabled = false;
     setAuthModeLabel();
@@ -605,6 +638,10 @@ function lock(message = '') {
   $('backupShow').hidden = true;
   $('backupMsg').textContent = '';
   $('backupStatus').textContent = '';
+  S.keys = [];
+  $('keyList').replaceChildren();
+  $('keyMsg').textContent = '';
+  $('keyName').value = '';
   $('healthBadge').hidden = true;
   $('healthSum').textContent = '';
   $('toast').classList.remove('show', 'has-action');
@@ -1410,6 +1447,7 @@ function renderAccount() {
   $('tfaBegin').hidden = S.totp;
   $('tfaOff').hidden = !S.totp;
   renderBackup();
+  renderKeys();
   const q = quickFor(S.username);
   $('pinBtn').textContent = q && q.pin ? 'Change PIN' : 'Set PIN';
   $('pinOff').hidden = !(q && q.pin);
@@ -1641,6 +1679,7 @@ $('tfaOff').addEventListener('click', () => withButton($('tfaOff'), $('tfaMsg'),
   await authed(() => api('totp_disable', { auth: keys.auth }));
   S.totp = false;
   S.backup = 0;
+  S.keys = [];
   trust = null;
   await store.del('trust').catch(() => {});
   await patchCache();
@@ -1800,6 +1839,26 @@ $('signOutBtn').addEventListener('click', async () => {
 });
 
 $('totpAlt').addEventListener('click', () => { setBackupMode(!backupMode); $('authMsg').textContent = ''; $('aTotp').focus(); });
+// Second step with a security key: the key signs the server's challenge, then the form is sent again with it.
+$('keyBtn').addEventListener('click', async () => {
+  if (!keyOffer || $('authBtn').disabled) return;
+  const msg = $('authMsg');
+  msg.textContent = '';
+  let a;
+  try {
+    a = await navigator.credentials.get({ publicKey: {
+      challenge: b64u.dec(keyOffer.challenge),
+      rpId: location.hostname,
+      allowCredentials: keyOffer.ids.map((id) => ({ type: 'public-key', id: b64u.dec(id) })),
+      userVerification: 'discouraged', timeout: 60000,
+    } });
+  } catch { msg.textContent = ERRORS.key_cancelled; return; }
+  keyAnswer = {
+    id: b64u.enc(a.rawId), clientData: b64u.enc(a.response.clientDataJSON),
+    authData: b64u.enc(a.response.authenticatorData), sig: b64u.enc(a.response.signature),
+  };
+  $('authForm').requestSubmit();
+});
 
 /* ---------- Two-factor backup codes ---------- */
 
@@ -1818,7 +1877,9 @@ async function loadAccountInfo() {
     const r = await authed(() => api('account'));
     if (!S.encKey) return;
     S.backup = r.backup;
+    S.keys = Array.isArray(r.keys) ? r.keys : [];
     renderBackup();
+    renderKeys();
   } catch { /* offline: the count simply stays as it was */ }
 }
 $('backupNew').addEventListener('click', () => withButton($('backupNew'), $('backupMsg'), async () => {
@@ -1844,6 +1905,77 @@ $('backupSave').addEventListener('click', () => {
   toast('Backup codes downloaded');
 });
 $('backupHide').addEventListener('click', () => { backupList = null; $('backupCodes').textContent = ''; $('backupShow').hidden = true; $('backupMsg').textContent = ''; });
+
+/* ---------- Security keys ---------- */
+
+function renderKeys() {
+  $('tfaKeys').hidden = !S.totp;
+  const list = S.totp ? S.keys || [] : [];
+  $('keyStatus').textContent = !keysUsable() ? 'This browser cannot use security keys.'
+    : list.length ? '' : 'No security keys yet.';
+  $('keyAdd').disabled = !keysUsable();
+  const frag = document.createDocumentFragment();
+  for (const k of list) {
+    const row = document.createElement('div');
+    row.className = 'dev-row';
+    const top = document.createElement('div');
+    top.className = 'dev-top';
+    const name = document.createElement('strong');
+    name.textContent = k.name;
+    top.append(name);
+    const sub = document.createElement('p');
+    sub.className = 'muted';
+    sub.textContent = 'Added ' + since(k.at) + ' · ' + (k.last ? 'last used ' + since(k.last) : 'not used yet');
+    const acts = document.createElement('div');
+    acts.className = 'dev-acts';
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'btn small danger';
+    b.textContent = 'Remove';
+    b.setAttribute('aria-label', 'Remove security key ' + k.name);
+    b.addEventListener('click', () => withButton(b, $('keyMsg'), async () => {
+      const { keys } = await confirmMaster($('tfaPass').value);
+      const r = await authed(() => api('key_remove', { auth: keys.auth, id: k.id }));
+      S.keys = r.keys;
+      $('tfaPass').value = '';
+      return 'Security key removed.';
+    }));
+    acts.append(b);
+    row.append(top, sub, acts);
+    frag.append(row);
+  }
+  $('keyList').replaceChildren(frag);
+}
+$('keyAdd').addEventListener('click', () => withButton($('keyAdd'), $('keyMsg'), async () => {
+  if (!keysUsable()) throw new Error('key_unsupported');
+  const name = $('keyName').value.trim();
+  if (!name || name.length > 40) throw new Error('bad_key_name');
+  const { keys } = await confirmMaster($('tfaPass').value);
+  const g = await authed(() => api('key_begin', { auth: keys.auth }));
+  let cred;
+  try {
+    cred = await navigator.credentials.create({ publicKey: {
+      challenge: b64u.dec(g.challenge),
+      rp: { name: 'Vault', id: location.hostname },
+      user: { id: b64u.dec(g.user), name: S.username, displayName: 'Vault sign-in: ' + S.username },
+      pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
+      excludeCredentials: g.ids.map((id) => ({ type: 'public-key', id: b64u.dec(id) })),
+      authenticatorSelection: { residentKey: 'discouraged', userVerification: 'discouraged' },
+      timeout: 60000, attestation: 'none',
+    } });
+  } catch { throw new Error('key_failed'); }
+  const res = cred.response;
+  const pk = res.getPublicKey ? res.getPublicKey() : null;
+  if (!pk || !res.getAuthenticatorData) throw new Error('key_unsupported');
+  const r = await authed(() => api('key_add', {
+    name, id: b64u.enc(cred.rawId), clientData: b64u.enc(res.clientDataJSON),
+    authData: b64u.enc(res.getAuthenticatorData()), pk: b64u.enc(pk), alg: res.getPublicKeyAlgorithm(),
+  }));
+  S.keys = r.keys;
+  $('keyName').value = '';
+  $('tfaPass').value = '';
+  return 'Security key added. On a new device you can now use it instead of typing a code.';
+}));
 
 /* ---------- Devices ---------- */
 

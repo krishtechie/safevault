@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="vault-build" content="21">
+<meta name="vault-build" content="22">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://api.pwnedpasswords.com; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
@@ -60,6 +60,7 @@
         <input id="aTotp" class="pin" type="text" inputmode="numeric" maxlength="6" autocomplete="one-time-code" autocapitalize="none" autocorrect="off" spellcheck="false">
       </label>
       <button id="totpAlt" class="link" type="button">Use a backup code instead</button>
+      <button id="keyBtn" class="btn" type="button" hidden>Use a security key</button>
     </div>
     <label id="pinField" hidden>PIN
       <input id="aPin" class="pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="off">
@@ -208,7 +209,7 @@
         <p id="bioMsg" class="msg"></p>
       </details>
       <details class="card fold" name="settings">
-        <summary><h3>Two-factor sign-in</h3><span class="fold-sub">A code from your authenticator at sign-in</span></summary>
+        <summary><h3>Two-factor sign-in</h3><span class="fold-sub">A code or a security key at sign-in</span></summary>
         <p id="tfaStatus" class="muted"></p>
         <p class="muted">With this on, signing in on a new device needs your master password and a 6-digit code from an authenticator app (Apple Passwords, Google Authenticator, Microsoft Authenticator and others). Devices you already use are not asked again. If you lose the authenticator, the recovery key gets you back in.</p>
         <label>Current master password
@@ -246,6 +247,17 @@
             </div>
           </div>
           <p id="backupMsg" class="msg"></p>
+        </div>
+        <div id="tfaKeys" hidden>
+          <h4>Security keys</h4>
+          <p class="muted">A hardware key (YubiKey and others) or a passkey on your phone or computer. On a new device you tap the key in place of typing a code. A key only answers the real site, so a look-alike page cannot trick it. The authenticator and backup codes keep working. Enter your master password above first.</p>
+          <p id="keyStatus" class="muted"></p>
+          <div id="keyList"></div>
+          <label>Name for the new key
+            <input id="keyName" type="text" maxlength="40" autocomplete="off" placeholder="YubiKey, iPhone passkey">
+          </label>
+          <button id="keyAdd" class="btn" type="button">Add a security key</button>
+          <p id="keyMsg" class="msg"></p>
         </div>
       </details>
       <details id="devFold" class="card fold" name="settings">

@@ -243,13 +243,17 @@ const ALERT_EVENTS = [
     'recovery_clear' => 'Your recovery key was removed',
     'totp_off'       => 'Two-factor sign-in was turned off',
     'history_restore' => 'Your vault was restored to an earlier version',
+    'key_add'        => 'A security key was added',
+    'key_remove'     => 'A security key was removed',
+    'key_used'       => 'A new device was approved with a security key',
+    'key_fail'       => 'A security key check failed',
 ];
 const ALERT_SMART = ['device_new', 'rekey', 'recover_ok', 'totp_off', 'recovery_clear', 'login_blocked', 'recover_blocked'];
 // Which colour the notice carries: green for a normal sign-in, red for a failed or refused attempt, amber for a change.
 const ALERT_TONES = [
     'login_ok' => 'ok', 'device_new' => 'new', 'backup_used' => 'fail',
     'login_fail' => 'fail', 'pin_fail' => 'fail', 'totp_fail' => 'fail', 'recover_fail' => 'fail', 'recover_blocked' => 'fail',
-    'login_blocked' => 'fail', 'pin_locked' => 'fail', 'device_refused' => 'fail',
+    'login_blocked' => 'fail', 'pin_locked' => 'fail', 'device_refused' => 'fail', 'key_fail' => 'fail',
 ];
 // "Chrome on macOS" from a browser's user agent line.
 function ua_label(string $ua): string {
@@ -642,6 +646,80 @@ $isTrusted = function (array $user, mixed $token) use ($trustHash): bool {
     return false;
 };
 
+/* ---------- Security keys (WebAuthn) as a second step ---------- */
+// A security key, or a passkey held by a phone or laptop, can pass the second step instead of a typed code.
+// The key signs a one-time challenge together with the address of the site it is talking to, so a code-stealing
+// look-alike site gets nothing it can reuse. Only public keys are stored here.
+
+const KEY_MAX = 5;
+function b64u_enc(string $bin): string { return rtrim(strtr(base64_encode($bin), '+/', '-_'), '='); }
+function b64u_dec(mixed $s, int $max = 8192): ?string {
+    if (!is_string($s) || $s === '' || strlen($s) > $max || !preg_match('/^[A-Za-z0-9_-]+$/', $s)) return null;
+    $bin = base64_decode(strtr($s, '-_', '+/') . str_repeat('=', (4 - strlen($s) % 4) % 4), true);
+    return $bin === false ? null : $bin;
+}
+// A challenge is random bytes, an expiry five minutes out, and a keyed checksum tying it to one account and one
+// purpose. Nothing is stored until it is used, and then only a marker so that it cannot be used twice.
+$keyChallenge = function (string $u, string $purpose) use ($secret): string {
+    $raw = random_bytes(16) . pack('N', time() + 300);
+    return b64u_enc($raw . substr(hash_hmac('sha256', "key-challenge-v1|$purpose|$u|" . $raw, $secret, true), 0, 16));
+};
+$keyChallengeOk = function (string $u, string $purpose, mixed $challenge) use ($secret): bool {
+    $bin = b64u_dec($challenge, 64);
+    if ($bin === null || strlen($bin) !== 36) return false;
+    $raw = substr($bin, 0, 20);
+    if (!hash_equals(substr(hash_hmac('sha256', "key-challenge-v1|$purpose|$u|" . $raw, $secret, true), 0, 16), substr($bin, 20))) return false;
+    if (unpack('N', substr($raw, 16, 4))[1] < time()) return false;
+    $used = 'key-challenge:' . bin2hex($bin);
+    if (throttle_count($used, 600) > 0) return false;
+    throttle_hit($used, 600);
+    return true;
+};
+// What the browser says it did: which kind of request, for which challenge, on which site.
+function key_client(string $json, string $type): ?array {
+    $c = json_decode($json, true);
+    if (!is_array($c) || ($c['type'] ?? null) !== $type || !is_string($c['challenge'] ?? null) || !is_string($c['origin'] ?? null)) return null;
+    if (!empty($c['crossOrigin'])) return null;
+    return ['challenge' => $c['challenge'], 'origin' => $c['origin']];
+}
+// The site a new key may be registered for is this one: the address the request came to, over HTTPS.
+// Plain HTTP is accepted for localhost only, which is how browsers treat it too.
+function key_site(string $origin): ?string {
+    $host = strtolower((string)($_SERVER['HTTP_HOST'] ?? ''));
+    if (!preg_match('~^(https?)://([a-z0-9.-]{1,100})(:\d{1,5})?$~', $origin, $m)) return null;
+    if ($m[2] . ($m[3] ?? '') !== $host) return null;
+    if ($m[1] !== 'https' && $m[2] !== 'localhost') return null;
+    return $m[2];
+}
+function key_pem(string $der): string {
+    return "-----BEGIN PUBLIC KEY-----\n" . chunk_split(base64_encode($der), 64, "\n") . "-----END PUBLIC KEY-----\n";
+}
+$keyList = fn(array $user): array => array_map(
+    fn($k) => ['id' => (string)$k['id'], 'name' => (string)($k['name'] ?? ''), 'at' => (int)($k['at'] ?? 0), 'last' => (int)($k['last'] ?? 0)],
+    array_values($user['keys'] ?? [])
+);
+// Checks one signed answer from a key at sign-in. Returns the key's new use counter, or null if anything is off.
+$keyVerify = function (string $u, array $rec, array $in) use ($keyChallengeOk): ?int {
+    $cd = b64u_dec($in['clientData'] ?? null);
+    $ad = b64u_dec($in['authData'] ?? null);
+    $sig = b64u_dec($in['sig'] ?? null);
+    if ($cd === null || $ad === null || $sig === null || strlen($ad) < 37) return null;
+    $c = key_client($cd, 'webauthn.get');
+    if ($c === null || !hash_equals((string)($rec['origin'] ?? ''), $c['origin'])) return null;
+    if (!hash_equals(hash('sha256', (string)($rec['rp'] ?? ''), true), substr($ad, 0, 32))) return null;
+    if ((ord($ad[32]) & 0x01) === 0) return null; // the person must have touched or confirmed the key
+    $der = base64_decode((string)($rec['pk'] ?? ''), true);
+    $pub = $der === false ? false : openssl_pkey_get_public(key_pem($der));
+    if ($pub === false || openssl_verify($ad . hash('sha256', $cd, true), $sig, $pub, OPENSSL_ALGO_SHA256) !== 1) return null;
+    // Keys that count their uses must always count upwards; going backwards means a copy exists.
+    $count = unpack('N', substr($ad, 33, 4))[1];
+    $before = (int)($rec['count'] ?? 0);
+    if (($count !== 0 || $before !== 0) && $count <= $before) return null;
+    // Last, so a failed attempt cannot use up a good challenge.
+    if (!$keyChallengeOk($u, 'get', $c['challenge'])) return null;
+    return $count;
+};
+
 /* ---------- Version history ---------- */
 
 // Every save first files the copy it replaces. Kept: the 5 most recent, then older ones at least an hour apart,
@@ -742,10 +820,43 @@ case 'POST login': {
     }
     $newTrust = null;
     if (!empty($user['totp']) && !$isTrusted($user, $body['trust'] ?? null)) {
-        // Right master password on a device that has not passed the code check: ask for the code.
-        if (!isset($body['totp']) || $body['totp'] === '') out(401, ['error' => 'totp_required']);
+        // Right master password on a device that has not passed the second step: ask for the code,
+        // and offer the security key check if the account has keys.
+        $keyOffer = empty($user['keys']) ? [] : ['key' => ['ids' => array_column($user['keys'], 'id')]];
+        $keyIn = is_array($body['key'] ?? null) ? $body['key'] : null;
+        if ($keyIn === null && (!isset($body['totp']) || $body['totp'] === '')) {
+            if ($keyOffer) $keyOffer['key']['challenge'] = $keyChallenge($u, 'get');
+            out(401, ['error' => 'totp_required'] + $keyOffer);
+        }
         $tk = "totp:$ip|$u";
         if (throttle_count($tk, 900) >= 5) fail(429, 'slow_down');
+        if ($keyIn !== null) {
+            $count = null;
+            $kid = is_string($keyIn['id'] ?? null) ? $keyIn['id'] : '';
+            foreach ($user['keys'] ?? [] as $rec) {
+                if (hash_equals((string)$rec['id'], $kid)) { $count = $keyVerify($u, $rec, $keyIn); break; }
+            }
+            if ($count === null) {
+                throttle_hit($tk, 900);
+                $audit($u, 'key_fail');
+                $audit('_server', 'key_fail', $u);
+                if ($keyOffer) $keyOffer['key']['challenge'] = $keyChallenge($u, 'get');
+                out(401, ['error' => 'bad_key'] + $keyOffer);
+            }
+            throttle_clear($tk);
+            $newTrust = base64_encode(random_bytes(32));
+            $updateUser($u, function (array $fresh) use ($kid, $count, $newTrust, $trustHash, $dh) {
+                foreach ($fresh['keys'] ?? [] as $i => $k) {
+                    if ($k['id'] === $kid) { $fresh['keys'][$i]['count'] = $count; $fresh['keys'][$i]['last'] = time(); }
+                }
+                $ua = substr((string)preg_replace('/[^\x20-\x7E]/', '', (string)($_SERVER['HTTP_USER_AGENT'] ?? '')), 0, 200);
+                $entry = ['h' => $trustHash($newTrust), 'at' => time(), 'ua' => $ua];
+                if ($dh !== null) $entry['d'] = $dh;
+                $fresh['trusted'] = array_slice(array_merge($fresh['trusted'] ?? [], [$entry]), -10);
+                return $fresh;
+            });
+            $audit($u, 'key_used');
+        } else {
         $key = $totpOpen($user['totp']['secret'] ?? null) ?? fail(500, 'totp_unreadable');
         $newTrust = base64_encode(random_bytes(32));
         $step = null;
@@ -782,6 +893,7 @@ case 'POST login': {
         }
         throttle_clear($tk);
         $audit($u, $usedBackup ? 'backup_used' : 'device_trusted');
+        }
     }
     sign_in($u, (int)($user['gen'] ?? 0));
     $isNew = $touchDevice($u, $trustHash($body['trust'] ?? null));
@@ -847,9 +959,91 @@ case 'POST totp_disable': {
     $u = require_user();
     $user = read_json($userFile($u)) ?? fail(404, 'no_account');
     if (!$verify('login', $u, $body['auth'] ?? null, $user['auth_hash'] ?? null)) fail(401, 'bad_credentials');
-    $updateUser($u, function (array $fresh) { unset($fresh['totp'], $fresh['trusted']); return $fresh; });
+    $updateUser($u, function (array $fresh) { unset($fresh['totp'], $fresh['trusted'], $fresh['keys']); return $fresh; });
     $audit($u, 'totp_off');
     out(200, ['totp' => false]);
+}
+
+case 'POST key_begin': {
+    // First half of adding a security key: prove the master password, get a one-time challenge for the key to sign.
+    $u = require_user();
+    $user = read_json($userFile($u)) ?? fail(404, 'no_account');
+    if (!$verify('login', $u, $body['auth'] ?? null, $user['auth_hash'] ?? null)) fail(401, 'bad_credentials');
+    if (empty($user['totp'])) fail(400, 'key_needs_totp');
+    if (count($user['keys'] ?? []) >= KEY_MAX) fail(400, 'key_limit');
+    out(200, [
+        'challenge' => $keyChallenge($u, 'create'),
+        'user' => b64u_enc(substr(hash_hmac('sha256', "key-user-v1|$u", $secret, true), 0, 16)),
+        'ids' => array_column($user['keys'] ?? [], 'id'),
+    ]);
+}
+
+case 'POST key_add': {
+    // Second half: the browser hands over what the key produced. The challenge proves the master password
+    // was given a moment ago in key_begin, so it is not asked for twice.
+    $u = require_user();
+    $name = is_string($body['name'] ?? null) ? trim((string)preg_replace('/[\x00-\x1F\x7F<>]|\xC2[\x80-\x9F]/', '', $body['name'])) : '';
+    if ($name === '' || !mb_check_encoding($name, 'UTF-8') || mb_strlen($name, 'UTF-8') > 40) fail(400, 'bad_key_name');
+    $id = b64u_dec($body['id'] ?? null, 1400);
+    $cd = b64u_dec($body['clientData'] ?? null);
+    $ad = b64u_dec($body['authData'] ?? null);
+    $der = b64u_dec($body['pk'] ?? null, 2048);
+    $alg = $body['alg'] ?? null;
+    if ($id === null || $cd === null || $ad === null || $der === null || !in_array($alg, [-7, -257], true)) fail(400, 'bad_key');
+    $c = key_client($cd, 'webauthn.create') ?? fail(400, 'bad_key');
+    $rp = key_site($c['origin']) ?? fail(400, 'bad_key');
+    // The key's own record: made for this site, with a person present, and carrying the same id the browser reported.
+    if (strlen($ad) < 55 || !hash_equals(hash('sha256', $rp, true), substr($ad, 0, 32))) fail(400, 'bad_key');
+    $flags = ord($ad[32]);
+    if (($flags & 0x01) === 0 || ($flags & 0x40) === 0) fail(400, 'bad_key');
+    $idLen = unpack('n', substr($ad, 53, 2))[1];
+    if ($idLen < 1 || !hash_equals(substr($ad, 55, $idLen), $id)) fail(400, 'bad_key');
+    // The public key must be the kind that was asked for, and must be the one inside the key's own record.
+    $pub = openssl_pkey_get_public(key_pem($der));
+    $d = $pub === false ? false : openssl_pkey_get_details($pub);
+    if ($d === false) fail(400, 'bad_key');
+    $rest = substr($ad, 55 + $idLen);
+    if ($alg === -7) {
+        if (($d['type'] ?? null) !== OPENSSL_KEYTYPE_EC || ($d['ec']['curve_name'] ?? '') !== 'prime256v1') fail(400, 'bad_key');
+        $parts = [str_pad($d['ec']['x'], 32, "\0", STR_PAD_LEFT), str_pad($d['ec']['y'], 32, "\0", STR_PAD_LEFT)];
+    } else {
+        if (($d['type'] ?? null) !== OPENSSL_KEYTYPE_RSA || (int)($d['bits'] ?? 0) < 2048) fail(400, 'bad_key');
+        $parts = [ltrim($d['rsa']['n'], "\0")];
+    }
+    foreach ($parts as $part) if (!str_contains($rest, $part)) fail(400, 'bad_key');
+    if (!$keyChallengeOk($u, 'create', $c['challenge'])) fail(400, 'key_expired');
+    $kid = b64u_enc($id);
+    $state = 'ok';
+    $user = $updateUser($u, function (array $fresh) use ($kid, $der, $alg, $ad, $name, $rp, $c, &$state) {
+        if (empty($fresh['totp'])) { $state = 'key_needs_totp'; return $fresh; }
+        if (count($fresh['keys'] ?? []) >= KEY_MAX) { $state = 'key_limit'; return $fresh; }
+        foreach ($fresh['keys'] ?? [] as $k) if ($k['id'] === $kid) { $state = 'key_exists'; return $fresh; }
+        $fresh['keys'][] = [
+            'id' => $kid, 'pk' => base64_encode($der), 'alg' => $alg, 'count' => unpack('N', substr($ad, 33, 4))[1],
+            'name' => $name, 'at' => time(), 'last' => 0, 'rp' => $rp, 'origin' => $c['origin'],
+        ];
+        return $fresh;
+    });
+    if ($state !== 'ok') fail(400, $state);
+    $audit($u, 'key_add');
+    out(200, ['keys' => $keyList($user)]);
+}
+
+case 'POST key_remove': {
+    $u = require_user();
+    $user = read_json($userFile($u)) ?? fail(404, 'no_account');
+    if (!$verify('login', $u, $body['auth'] ?? null, $user['auth_hash'] ?? null)) fail(401, 'bad_credentials');
+    $kid = is_string($body['id'] ?? null) ? $body['id'] : '';
+    $found = false;
+    $user = $updateUser($u, function (array $fresh) use ($kid, &$found) {
+        $keep = array_values(array_filter($fresh['keys'] ?? [], fn($k) => $k['id'] !== $kid));
+        $found = count($keep) !== count($fresh['keys'] ?? []);
+        if ($keep) $fresh['keys'] = $keep; else unset($fresh['keys']);
+        return $fresh;
+    });
+    if (!$found) fail(404, 'no_key');
+    $audit($u, 'key_remove');
+    out(200, ['keys' => $keyList($user)]);
 }
 
 case 'POST logout': {
@@ -868,7 +1062,7 @@ case 'POST logout': {
 case 'GET account': {
     $u = require_user();
     $user = read_json($userFile($u)) ?? fail(404, 'no_account');
-    out(200, ['wrap' => $user['wrap'] ?? null, 'recovery' => !empty($user['rec']), 'totp' => !empty($user['totp']), 'backup' => count($user['totp']['backup'] ?? [])]);
+    out(200, ['wrap' => $user['wrap'] ?? null, 'recovery' => !empty($user['rec']), 'totp' => !empty($user['totp']), 'backup' => count($user['totp']['backup'] ?? []), 'keys' => $keyList($user)]);
 }
 
 case 'POST setwrap': {
@@ -971,7 +1165,7 @@ case 'POST recover_finish': {
         $user['gen'] = (int)($user['gen'] ?? 0) + 1;
         $hadTotp = !empty($user['totp']);
         if ($dropTotp || !$hadTotp) {
-            unset($user['totp'], $user['trusted']);
+            unset($user['totp'], $user['trusted'], $user['keys']);
         } else {
             // As with a password change, only the device doing the recovery stays trusted.
             $mine = $trustHash($body['trust'] ?? null);
