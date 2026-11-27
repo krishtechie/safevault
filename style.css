@@ -331,3 +331,12 @@ a.btn { display: inline-flex; align-items: center; text-decoration: none; }
 .need dt { font-size: 13px; color: var(--muted); margin-top: 12px; }
 .need dt:first-child { margin-top: 0; }
 .need dd { margin: 2px 0 0; font-size: 17px; line-height: 1.3; }
+
+/* Previous passwords of an entry, inside the edit sheet. */
+.hist { margin: -4px 0 14px; }
+.hist > summary { cursor: pointer; color: var(--accent); font-size: 15px; padding: 6px 0; }
+.hist-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 0; border-top: .5px solid var(--line); }
+.hist-row code { font-size: 15px; word-break: break-all; }
+.hist-row .muted { margin: 2px 0 0; }
+.hist-acts { display: flex; gap: 8px; flex-shrink: 0; }
+.hist .link { font-size: 15px; color: var(--danger); padding: 8px 0 0; }

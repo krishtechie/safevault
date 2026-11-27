@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="vault-build" content="25">
+<meta name="vault-build" content="26">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://api.pwnedpasswords.com; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
@@ -442,6 +442,11 @@
       <input id="fUrl" type="url" inputmode="url" maxlength="2048" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="https://">
     </label>
     <p id="fAge" class="muted small"></p>
+    <details id="fHist" class="hist" hidden>
+      <summary id="fHistSum"></summary>
+      <div id="fHistList"></div>
+      <button id="fHistClear" class="link" type="button">Forget previous passwords</button>
+    </details>
     <a id="fGo" class="link" target="_blank" rel="noopener noreferrer" hidden>Copy password and open website</a>
     <label>Authenticator key (optional)
       <input id="fTotp" type="text" maxlength="600" autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" placeholder="Key or otpauth:// link from the site">

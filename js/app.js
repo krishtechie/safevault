@@ -8,7 +8,7 @@ const API = 'api/index.php';
 // The page and this script are published together. Right after an update a browser can hold one of them from
 // before; the missing parts would then stop the app from starting. When they do not match, fetch fresh copies
 // and reload, once.
-const BUILD = '25';
+const BUILD = '26';
 {
   const page = document.querySelector('meta[name="vault-build"]');
   let tried = false;
@@ -1131,6 +1131,7 @@ function openItem(id, why = '') {
   $('fShow').textContent = 'Show';
   $('fDelete').hidden = !it;
   $('fAge').textContent = it?.pwAt ? 'Password last changed ' + ago(it.pwAt) : '';
+  renderPwHistory(it);
   $('itemMsg').textContent = '';
   for (const id of FIELD_IDS) $(id).classList.remove('bad');
   $('itemDlg').showModal();
@@ -1158,6 +1159,56 @@ $('fTags').addEventListener('input', renderTagPick);
 
 $('addBtn').addEventListener('click', () => { openItem(null); if (activeTag) { $('fTags').value = activeTag; renderTagPick(); } });
 $('fCancel').addEventListener('click', () => $('itemDlg').close());
+
+// Earlier passwords of the open entry. Each stays hidden until Show is tapped, and is never left in the page after closing.
+function renderPwHistory(it) {
+  const hist = it?.hist || [];
+  $('fHist').hidden = !hist.length;
+  $('fHist').open = false;
+  $('fHistSum').textContent = hist.length === 1 ? '1 previous password' : hist.length + ' previous passwords';
+  const frag = document.createDocumentFragment();
+  for (const h of hist) {
+    const row = document.createElement('div');
+    row.className = 'hist-row';
+    const text = document.createElement('div');
+    const val = document.createElement('code');
+    val.textContent = '\u2022'.repeat(10);
+    const when = document.createElement('p');
+    when.className = 'muted small';
+    when.textContent = h.at ? 'Set ' + ago(h.at) : 'Earlier password';
+    text.append(val, when);
+    const acts = document.createElement('span');
+    acts.className = 'hist-acts';
+    const show = document.createElement('button');
+    show.type = 'button';
+    show.className = 'btn small';
+    show.textContent = 'Show';
+    show.addEventListener('click', () => {
+      const hidden = show.textContent === 'Show';
+      val.textContent = hidden ? h.p : '\u2022'.repeat(10);
+      show.textContent = hidden ? 'Hide' : 'Show';
+    });
+    const cp = document.createElement('button');
+    cp.type = 'button';
+    cp.className = 'btn small';
+    cp.textContent = 'Copy';
+    cp.addEventListener('click', () => copy(h.p, 'Previous password copied'));
+    acts.append(show, cp);
+    row.append(text, acts);
+    frag.append(row);
+  }
+  $('fHistList').replaceChildren(frag);
+}
+armed($('fHistClear'), 'Forget previous passwords', async () => {
+  const i = S.items.findIndex((x) => x.id === editingId);
+  if (i < 0) return;
+  const { hist, ...rest } = S.items[i];
+  S.items[i] = { ...rest, updatedAt: Date.now() };
+  breach.carry(editingId, rest.updatedAt, S.items[i].updatedAt);
+  renderPwHistory(S.items[i]);
+  await persist();
+  toast('Previous passwords forgotten');
+});
 $('fUserCopy').addEventListener('click', () => { recents.touch(editingId); copy($('fUser').value, 'Username copied'); });
 $('fPassCopy').addEventListener('click', () => { recents.touch(editingId); copy($('fPass').value, 'Password copied'); });
 
@@ -1191,7 +1242,7 @@ $('fTotp').addEventListener('input', showCode);
 // A field marked as wrong goes back to normal as soon as it is edited.
 for (const id of FIELD_IDS) $(id).addEventListener('input', () => $(id).classList.remove('bad'));
 $('codeCopy').addEventListener('click', () => { recents.touch(editingId); copy($('codeNow').textContent.replace(/\s/g, ''), 'Code copied'); });
-$('itemDlg').addEventListener('close', () => { clearInterval(codeTimer); $('codeBox').hidden = true; $('codeNow').textContent = ''; $('fTotp').value = ''; });
+$('itemDlg').addEventListener('close', () => { clearInterval(codeTimer); $('codeBox').hidden = true; $('codeNow').textContent = ''; $('fTotp').value = ''; $('fHistList').replaceChildren(); $('fHist').hidden = true; });
 $('fShow').addEventListener('click', () => {
   const show = $('fPass').type === 'password';
   $('fPass').type = show ? 'text' : 'password';
@@ -1225,8 +1276,11 @@ $('itemForm').addEventListener('submit', async (ev) => {
     const i = S.items.findIndex((x) => x.id === editingId);
     const { fav, totp, tags, ...kept } = S.items[i]; // optional fields come only from the form
     // The password's age restarts only when the password itself changes.
-    if (kept.password !== data.password) data.pwAt = data.updatedAt;
-    else breach.carry(editingId, kept.updatedAt, data.updatedAt);
+    if (kept.password !== data.password) {
+      data.pwAt = data.updatedAt;
+      const hist = core.pushPasswordHistory(kept, data.password); // the outgoing password is kept, newest first
+      if (hist.length) data.hist = hist;
+    } else breach.carry(editingId, kept.updatedAt, data.updatedAt);
     S.items[i] = { ...kept, ...data };
   } else {
     S.items.push({ id: core.newId(), createdAt: Date.now(), ...data, pwAt: data.updatedAt });

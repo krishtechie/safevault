@@ -563,3 +563,45 @@ test('the secret key flag survives the safety check on key settings, and only as
   assert.deepEqual(core.checkKdf({ ...kdf, sk: 0 }), kdf);
   assert.deepEqual(core.checkKdf({ ...kdf, sk: true, extra: 9 }), kdf);
 });
+
+/* ---------- Password history ---------- */
+
+test('replacing a password keeps the outgoing one, newest first, five at most', () => {
+  let it = { password: 'p0', pwAt: 100, updatedAt: 100 };
+  for (let n = 1; n <= 7; n++) {
+    const hist = core.pushPasswordHistory(it, 'p' + n);
+    it = { password: 'p' + n, pwAt: 100 + n, updatedAt: 100 + n, hist };
+  }
+  assert.deepEqual(it.hist.map((h) => h.p), ['p6', 'p5', 'p4', 'p3', 'p2']);
+  assert.deepEqual(it.hist.map((h) => h.at), [106, 105, 104, 103, 102]);
+  assert.equal(core.PW_HISTORY, 5);
+});
+
+test('history ignores a password set to itself or from blank, and never lists one twice', () => {
+  assert.deepEqual(core.pushPasswordHistory({ password: 'same', pwAt: 5 }, 'same'), []);
+  assert.deepEqual(core.pushPasswordHistory({ password: '', pwAt: 5 }, 'new'), []);
+  const hist = core.pushPasswordHistory({ password: 'a', pwAt: 9, hist: [{ p: 'b', at: 3 }, { p: 'a', at: 1 }] }, 'c');
+  assert.deepEqual(hist, [{ p: 'a', at: 9 }, { p: 'b', at: 3 }]);
+  assert.deepEqual(core.pushPasswordHistory({ password: 'x', updatedAt: 7 }, 'y'), [{ p: 'x', at: 7 }]);
+});
+
+test('history survives cleaning, bounded and stripped of anything unexpected', () => {
+  const base = { id: 'a1', title: 'T', username: '', password: 'now', url: '', notes: '', createdAt: 1, updatedAt: 2 };
+  const many = Array.from({ length: 9 }, (_, i) => ({ p: 'old' + i, at: i + 1, extra: 'x' }));
+  const [clean] = core.sanitizeItems([{ ...base, hist: [...many.slice(0, 2), null, 'junk', { p: '', at: 4 }, { p: 5 }, ...many.slice(2)] }]);
+  assert.equal(clean.hist.length, 5);
+  assert.deepEqual(clean.hist[0], { p: 'old0', at: 1 });
+  assert.ok(clean.hist.every((h) => Object.keys(h).join() === 'p,at'));
+  const [long] = core.sanitizeItems([{ ...base, hist: [{ p: 'x'.repeat(400), at: -3 }] }]);
+  assert.deepEqual(long.hist, [{ p: 'x'.repeat(256), at: 0 }]);
+  for (const none of [undefined, [], 'nope', [{ p: '' }]]) assert.ok(!('hist' in core.sanitizeItems([{ ...base, hist: none }])[0]));
+});
+
+test('history travels through encryption and is carried by a merge', async () => {
+  const vk = await core.importVaultKey(core.newVaultKeyRaw());
+  const it = { id: 'h1', title: 'T', username: 'u', password: 'now', url: '', notes: '', createdAt: 1, updatedAt: 9, deleted: false, pwAt: 9, hist: [{ p: 'before', at: 4 }] };
+  const back = await core.decryptVault(vk, 'alice', await core.encryptVault(vk, 'alice', [it]));
+  assert.deepEqual(back[0].hist, [{ p: 'before', at: 4 }]);
+  const merged = core.mergeItems([{ ...it, hist: undefined, password: 'older', updatedAt: 3 }], back);
+  assert.deepEqual(merged.find((x) => x.id === 'h1').hist, [{ p: 'before', at: 4 }]);
+});

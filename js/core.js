@@ -220,7 +220,7 @@ const aad = (username) => te.encode('vault-v1|' + username);
 
 // Raised whenever entries gain a field that an older copy of the app would silently drop.
 // A device running older code then refuses to open (and overwrite) a newer vault and asks for a reload.
-export const VAULT_FORMAT = 3;
+export const VAULT_FORMAT = 4;
 
 export async function encryptVault(encKey, username, items) {
   const iv = randomBytes(12); // fresh nonce on every save
@@ -393,6 +393,17 @@ export function validateEntry(d) {
 
 // Everything read from the server, the device copy or a backup file passes through here:
 // unknown fields are dropped, text is cleaned and cut to length, unsafe addresses are blanked.
+// How many earlier passwords an entry remembers. They live inside the encrypted entry like everything else.
+export const PW_HISTORY = 5;
+// The history an entry should carry once its password has been replaced: the outgoing password goes on top.
+// Changing a password to itself, or to and from blank, adds nothing.
+export function pushPasswordHistory(prev, nextPassword) {
+  const hist = Array.isArray(prev.hist) ? prev.hist : [];
+  if (!prev.password || prev.password === nextPassword) return hist;
+  const at = prev.pwAt || prev.updatedAt || 0;
+  return [{ p: prev.password, at }, ...hist.filter((h) => h.p !== prev.password)].slice(0, PW_HISTORY);
+}
+
 export function sanitizeItems(items) {
   const out = [];
   const seen = new Set();
@@ -422,6 +433,13 @@ export function sanitizeItems(items) {
     try { const key = normalizeTotp(it.totp); if (key) clean.totp = key; } catch { /* drop an unusable key */ }
     const tags = normalizeTags(Array.isArray(it.tags) ? it.tags : []);
     if (tags.length) clean.tags = tags;
+    // Earlier passwords of this entry, newest first: { p: the password, at: when it was set }.
+    const hist = (Array.isArray(it.hist) ? it.hist : [])
+      .filter((h) => h && typeof h === 'object')
+      .map((h) => ({ p: text(h.p, LIMITS.password), at: time(h.at) }))
+      .filter((h) => h.p)
+      .slice(0, PW_HISTORY);
+    if (hist.length) clean.hist = hist;
     out.push(clean);
   }
   return out;
