@@ -8,7 +8,7 @@ const API = 'api/index.php';
 // The page and this script are published together. Right after an update a browser can hold one of them from
 // before; the missing parts would then stop the app from starting. When they do not match, fetch fresh copies
 // and reload, once.
-const BUILD = '26';
+const BUILD = '27';
 {
   const page = document.querySelector('meta[name="vault-build"]');
   let tried = false;
@@ -1158,6 +1158,25 @@ function renderTagPick() {
 $('fTags').addEventListener('input', renderTagPick);
 
 $('addBtn').addEventListener('click', () => { openItem(null); if (activeTag) { $('fTags').value = activeTag; renderTagPick(); } });
+// While a sheet is open the page behind must not move. Phones ignore a plain "no scrolling" rule on the page,
+// so the page is pinned where it was and put back when the sheet closes.
+let pinnedY = 0;
+function pinPage() {
+  const root = document.documentElement;
+  const open = !!document.querySelector('dialog[open]');
+  if (open === root.classList.contains('sheet-open')) return;
+  if (open) {
+    pinnedY = window.scrollY;
+    document.body.style.top = -pinnedY + 'px';
+    root.classList.add('sheet-open');
+  } else {
+    root.classList.remove('sheet-open');
+    document.body.style.top = '';
+    window.scrollTo(0, pinnedY);
+  }
+}
+for (const d of document.querySelectorAll('dialog')) new MutationObserver(pinPage).observe(d, { attributes: true, attributeFilter: ['open'] });
+
 $('fCancel').addEventListener('click', () => $('itemDlg').close());
 
 // Earlier passwords of the open entry. Each stays hidden until Show is tapped, and is never left in the page after closing.
